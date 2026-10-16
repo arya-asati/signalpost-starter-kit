@@ -1,0 +1,21 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Generated output and downloaded competition data
+out/
+brreg-enheter.csv
+signalpost-universe.jsonl.gz
+entry-companies.jsonl
+smoke-companies.jsonl
+
+# macOS
+.DS_Store
