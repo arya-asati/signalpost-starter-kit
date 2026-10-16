@@ -46,6 +46,56 @@ def write_jsonl(path: Path, rows: list[dict]) -> None:
 
     temporary.replace(path)
 
+def record_worker_failure(
+    profile: dict,
+    requested_modules: list[str],
+    error: Exception,
+    completed_at: str,
+) -> dict:
+    """Preserve a company result when an unexpected worker error occurs."""
+
+    evidence_records = profile.setdefault("evidence", {})
+    detail = f"{type(error).__name__}: {str(error).strip()[:240]}"
+
+    if not str(error).strip():
+        detail = type(error).__name__
+
+    missing_modules = []
+
+    for module in requested_modules:
+        if module in evidence_records:
+            continue
+
+        evidence_records[module] = {
+            "field": module,
+            "status": "source_error",
+            "source_type": "agent_execution",
+            "source_class": "agent_execution",
+            "retrieved_at": completed_at,
+            "note": (
+                "Worker failed before evidence was produced. "
+                f"Error: {detail}"
+            ),
+        }
+        missing_modules.append(module)
+
+    profile.setdefault("errors", []).append({
+        "kind": "worker_exception",
+        "message": detail,
+        "modules_missing_evidence": missing_modules,
+    })
+
+    # Unknown metrics remain unknown rather than being reported as zero.
+    profile["run_metrics"] = {
+        "requests": None,
+        "bytes": None,
+        "latencies_ms": [],
+        "runtime_ms": None,
+        "third_party_cost_usd": None,
+        "metrics_complete": False,
+    }
+
+    return profile
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -144,10 +194,14 @@ def main() -> None:
     }
 
     operations = {
-        "requests": 0,
-        "bytes": 0,
-        "latencies_ms": [],
-    }
+    "requests": 0,
+    "bytes": 0,
+    "latencies_ms": [],
+    "worker_failures": 0,
+    "request_metrics_complete": True,
+    "bytes_metrics_complete": True,
+    "latency_metrics_complete": True,
+}
 
     def enrich(profile: dict) -> tuple[dict, dict]:
         profile_started = time.perf_counter()
@@ -235,34 +289,55 @@ def main() -> None:
 
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {
-            pool.submit(enrich, profile): profile["organisation_number"]
-            for profile in pending_profiles
-        }
+        pool.submit(enrich, profile): profile
+        for profile in pending_profiles
+    }
 
-        for index, future in enumerate(
-            as_completed(futures),
-            1,
-        ):
+    for index, future in enumerate(as_completed(futures), 1):
+        original_profile = futures[future]
+
+        try:
             profile, metric = future.result()
-
-            state[profile["organisation_number"]] = profile
-            operations["requests"] += metric["requests"]
-            operations["bytes"] += metric["bytes"]
-            operations["latencies_ms"].extend(
-                metric["latencies_ms"]
+        except Exception as exc:
+            profile = record_worker_failure(
+                original_profile,
+                requested_modules,
+                exc,
+                utc_now(),
             )
+            metric = profile["run_metrics"]
 
-            if (
-                index % args.checkpoint_every == 0
-                or index == len(pending_profiles)
-            ):
-                checkpoint = [
-                    state[org]
-                    for org in orgs
-                    if org in state
-                ]
-                write_jsonl(profiles_output, checkpoint)
+            operations["worker_failures"] += 1
+            operations["request_metrics_complete"] = False
+            operations["bytes_metrics_complete"] = False
+            operations["latency_metrics_complete"] = False
 
+        state[profile["organisation_number"]] = profile
+
+        if metric.get("requests") is None:
+            operations["request_metrics_complete"] = False
+        else:
+            operations["requests"] += metric["requests"]
+
+        if metric.get("bytes") is None:
+            operations["bytes_metrics_complete"] = False
+        else:
+            operations["bytes"] += metric["bytes"]
+
+        operations["latencies_ms"].extend(
+            metric.get("latencies_ms") or []
+        )
+
+        if (
+            index % args.checkpoint_every == 0
+            or index == len(pending_profiles)
+        ):
+            checkpoint = [
+                state[org]
+                for org in orgs
+                if org in state
+            ]
+            write_jsonl(profiles_output, checkpoint)
     completed_at = utc_now()
     ordered_profiles = [state[org] for org in orgs]
 
@@ -390,9 +465,10 @@ def main() -> None:
     )
 
     raise SystemExit(
-        0 if validation["passed"] else 1
-    )
-
+    0
+    if validation["passed"] and operations["worker_failures"] == 0
+    else 1
+)
 
 if __name__ == "__main__":
     main()

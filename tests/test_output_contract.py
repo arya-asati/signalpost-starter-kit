@@ -1,11 +1,22 @@
 from __future__ import annotations
 
+import csv
+import gzip
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
+
+from scripts.run_competition_batch import (
+    main as run_batch_main,
+    record_worker_failure,
+)
 
 from norway_company_agent.output_contract import (
     AVAILABILITY_STATES,
@@ -52,7 +63,6 @@ class OutputContractTests(unittest.TestCase):
             availability_from_evidence("available", ""),
             "not_available",
         )
-
         self.assertEqual(
             availability_from_evidence("available", 0),
             "available",
@@ -326,6 +336,211 @@ class OutputContractTests(unittest.TestCase):
         self.assertFalse(
             result["checks"]["all_claim_evidence_references_resolve"]
         )
+
+    def test_worker_failure_preserves_company_and_creates_failed_evidence(self):
+        profile = {
+            "organisation_number": "123456789",
+            "name": "Example Company AS",
+            "evidence": {
+                "registry": {
+                    "field": "registry",
+                    "status": "available",
+                    "source_type": "official_registry_bulk",
+                    "source_class": "official_registry_bulk",
+                    "source_url": "https://registry.example/123456789",
+                    "retrieved_at": "2026-10-16T09:00:00Z",
+                    "content_sha256": "a" * 64,
+                    "value": {
+                        "organisation_number": "123456789",
+                        "name": "Example Company AS",
+                    },
+                }
+            },
+        }
+
+        result = record_worker_failure(
+            profile,
+            ["registry", "website"],
+            RuntimeError("simulated worker failure"),
+            "2026-10-16T09:01:00Z",
+        )
+
+        self.assertEqual(
+            result["evidence"]["registry"]["status"],
+            "available",
+        )
+        self.assertEqual(
+            result["evidence"]["website"]["status"],
+            "source_error",
+        )
+        self.assertNotIn(
+            "source_url",
+            result["evidence"]["website"],
+        )
+        self.assertEqual(
+            result["errors"][-1]["kind"],
+            "worker_exception",
+        )
+        self.assertIsNone(
+            result["run_metrics"]["requests"]
+        )
+
+        envelope = contract_envelope(
+            result,
+            run_id="worker-failure-test",
+            modules=["registry", "website"],
+            started_at="2026-10-16T09:00:00Z",
+            completed_at="2026-10-16T09:01:00Z",
+        )
+
+        validation = validate_contract_envelopes(
+            [envelope],
+            expected_count=1,
+        )
+        self.assertTrue(validation["passed"], validation)
+
+        website_claims = [
+            claim
+            for claim in envelope["claims"]
+            if claim["field"] == "official_website"
+        ]
+        self.assertEqual(len(website_claims), 1)
+        self.assertEqual(
+            website_claims[0]["availability"],
+            "failed",
+        )
+
+    def test_batch_runner_writes_outputs_after_worker_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+
+            bulk_path = root / "synthetic-brreg.csv.gz"
+            organisations_path = root / "organisations.jsonl"
+            output_path = root / "output.jsonl"
+            profiles_path = root / "profiles.jsonl"
+            report_path = root / "report.json"
+
+            fields = [
+                "organisasjonsnummer",
+                "navn",
+                "organisasjonsform.kode",
+                "antallAnsatte",
+                "konkurs",
+                "underAvvikling",
+                "forretningsadresse.kommune",
+                "forretningsadresse.kommunenummer",
+                "naeringskode1.kode",
+                "naeringskode1.beskrivelse",
+                "hjemmeside",
+                "sisteInnsendteAarsregnskap",
+            ]
+
+            row = {
+                "organisasjonsnummer": "123456789",
+                "navn": "Synthetic Example AS",
+                "organisasjonsform.kode": "AS",
+                "antallAnsatte": "3",
+                "konkurs": "false",
+                "underAvvikling": "false",
+                "forretningsadresse.kommune": "Oslo",
+                "forretningsadresse.kommunenummer": "0301",
+                "naeringskode1.kode": "62.010",
+                "naeringskode1.beskrivelse": "Computer programming",
+                "hjemmeside": "",
+                "sisteInnsendteAarsregnskap": "2025",
+            }
+
+            with gzip.open(
+                bulk_path,
+                "wt",
+                encoding="utf-8",
+                newline="",
+            ) as handle:
+                writer = csv.DictWriter(
+                    handle,
+                    fieldnames=fields,
+                    delimiter=";",
+                )
+                writer.writeheader()
+                writer.writerow(row)
+
+            organisations_path.write_text(
+                json.dumps({
+                    "organisation_number": "123456789"
+                }) + "\n",
+                encoding="utf-8",
+            )
+
+            argv = [
+                "run_competition_batch.py",
+                "--organisations", str(organisations_path),
+                "--bulk", str(bulk_path),
+                "--output", str(output_path),
+                "--profiles-output", str(profiles_path),
+                "--report", str(report_path),
+                "--run-id", "simulated-failure",
+                "--expected-count", "1",
+                "--workers", "1",
+                "--checkpoint-every", "1",
+                "--modules", "registry,financials",
+            ]
+
+            with (
+                patch.object(sys, "argv", argv),
+                patch(
+                    "scripts.run_competition_batch.fetch_official_modules",
+                    side_effect=RuntimeError(
+                        "synthetic worker failure"
+                    ),
+                ),
+            ):
+                with self.assertRaises(SystemExit) as caught:
+                    run_batch_main()
+
+            self.assertEqual(caught.exception.code, 1)
+
+            self.assertTrue(output_path.exists())
+            self.assertTrue(profiles_path.exists())
+            self.assertTrue(report_path.exists())
+
+            output_rows = [
+                json.loads(line)
+                for line in output_path.read_text(
+                    encoding="utf-8"
+                ).splitlines()
+                if line.strip()
+            ]
+
+            self.assertEqual(len(output_rows), 1)
+            self.assertEqual(
+                output_rows[0]["organisation_number"],
+                "123456789",
+            )
+
+            financial_claims = [
+                claim
+                for claim in output_rows[0]["claims"]
+                if claim["field"] == "financials"
+            ]
+
+            self.assertEqual(len(financial_claims), 1)
+            self.assertEqual(
+                financial_claims[0]["availability"],
+                "failed",
+            )
+
+            report = json.loads(
+                report_path.read_text(encoding="utf-8")
+            )
+
+            self.assertEqual(report["emitted_envelopes"], 1)
+            self.assertEqual(
+                report["operations"]["worker_failures"],
+                1,
+            )
+            self.assertFalse(
+                report["operations"]["request_metrics_complete"]
+            )
 
 
 if __name__ == "__main__":
