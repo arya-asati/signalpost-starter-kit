@@ -13,16 +13,16 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "src"))
 
-from scripts.run_competition_batch import (
-    main as run_batch_main,
-    record_worker_failure,
-)
-
-from norway_company_agent.output_contract import (
+from norway_company_agent.batch import profile_complete_for_modules  # noqa: E402
+from norway_company_agent.output_contract import (  # noqa: E402
     AVAILABILITY_STATES,
     availability_from_evidence,
     contract_envelope,
     validate_contract_envelopes,
+)
+from scripts.run_competition_batch import (  # noqa: E402
+    main as run_batch_main,
+    record_worker_failure,
 )
 
 
@@ -498,7 +498,6 @@ class OutputContractTests(unittest.TestCase):
                     run_batch_main()
 
             self.assertEqual(caught.exception.code, 1)
-
             self.assertTrue(output_path.exists())
             self.assertTrue(profiles_path.exists())
             self.assertTrue(report_path.exists())
@@ -541,6 +540,35 @@ class OutputContractTests(unittest.TestCase):
             self.assertFalse(
                 report["operations"]["request_metrics_complete"]
             )
+
+    def test_worker_failure_profile_is_not_complete_for_resume(self):
+        profile = {
+            "organisation_number": "123456789",
+            "name": "Example Company AS",
+            "evidence": {
+                "registry": {
+                    "status": "available",
+                },
+            },
+        }
+
+        failed_profile = record_worker_failure(
+            profile,
+            ["registry", "financials"],
+            RuntimeError("simulated worker failure"),
+            "2026-10-16T09:01:00Z",
+        )
+
+        self.assertEqual(
+            failed_profile["evidence"]["financials"]["status"],
+            "source_error",
+        )
+        self.assertFalse(
+            profile_complete_for_modules(
+                failed_profile,
+                ["registry", "financials"],
+            )
+        )
 
 
 if __name__ == "__main__":

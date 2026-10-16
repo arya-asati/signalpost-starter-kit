@@ -159,6 +159,26 @@ def validate_envelopes(envelopes: list[dict[str, Any]], expected_count: int) -> 
     return {"passed": all(checks.values()), "checks": checks, "invalid_states": invalid_states}
 
 
-def profile_complete_for_modules(profile: dict[str, Any], modules: Iterable[str]) -> bool:
+def profile_complete_for_modules(
+    profile: dict[str, Any],
+    modules: Iterable[str],
+) -> bool:
+    """Return False for incomplete modules or unexpected worker failures."""
+
+    errors = profile.get("errors") or []
+
+    # An unexpected worker exception should be retried on resume.
+    if any(
+        isinstance(error, dict)
+        and error.get("kind") == "worker_exception"
+        for error in errors
+    ):
+        return False
+
     records = profile.get("evidence", {})
-    return all(module in records and records[module].get("status") != "not_fetched" for module in modules)
+
+    return all(
+        module in records
+        and records[module].get("status") != "not_fetched"
+        for module in modules
+    )
