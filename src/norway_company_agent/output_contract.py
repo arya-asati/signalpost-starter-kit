@@ -117,6 +117,9 @@ def _evidence_item(
     source_url = record.get("source_url")
     retrieved_at = record.get("retrieved_at")
     content_hash = record.get("content_sha256")
+    for key in ("as_of", "effective_at"):
+        if record.get(key):
+            item[key] = record[key]
 
     if source_url:
         item["source_url"] = source_url
@@ -182,11 +185,18 @@ def _claim(
     value: Any,
     availability: str,
     evidence_ids: list[str],
+    confidence: float | None = None,
 ) -> dict[str, Any]:
+    """Build a claim without turning missing values into facts."""
+
+    if availability == "not_available":
+        value = None
+
     return {
         "field": field,
         "value": value,
         "availability": availability,
+        "confidence": confidence,
         "evidence_ids": evidence_ids,
     }
 
