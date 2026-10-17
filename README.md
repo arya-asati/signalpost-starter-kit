@@ -113,3 +113,49 @@ Submit a repository with:
 - declared models, APIs, licences and source-rights assumptions.
 
 Email the repository URL, run command, models/APIs and expected cost per 100-company run to `submit@builderr.ai`.
+
+
+## Evidence provenance and confidence
+
+### Confidence semantics
+
+The `confidence` field is a deterministic provenance heuristic. It is
+not a statistically calibrated probability and has not been calibrated
+against an independently labelled evaluation dataset.
+
+The heuristic considers the evidence source class, claim availability,
+and whether external evidence includes a source excerpt. Ambiguous
+claims receive lower confidence; unavailable or null-valued claims
+receive zero. External claims without a usable evidence span are capped
+at a lower value.
+
+The implementation and source-class mapping are maintained in
+`src/norway_company_agent/output_contract.py`. These values should not
+be interpreted as measured probabilities that a claim is correct.
+
+### Source evidence and limitations
+
+- Registry evidence retains the organisation-number row key, the
+  registry snapshot hash, and the captured CSV header and data row.
+- Fetched JSON responses retain their raw response hash, retrieval time,
+  and a bounded excerpt of the response text.
+- Website evidence includes source-derived page text when extraction
+  succeeds. Blocked, failed, or unavailable requests do not receive
+  fabricated excerpts.
+- Accounting-obligation classifications are local ruleset
+  interpretations. `ruleset_sha256` identifies the local ruleset
+  identifier; it is not a hash of the linked guidance webpage. The
+  guidance page is not claimed as a fetched source in these runs.
+- Structural validation confirms that claim references resolve to
+  evidence records. It does not independently prove that every excerpt
+  semantically supports every claim.
+
+### Local smoke-test result
+
+The final local run used run ID `smoke-final-001` and processed 100
+companies. It emitted 100 envelopes, reported zero worker failures,
+and passed the implemented structural validation checks.
+
+The machine-readable run report is `smoke-report.json`. This is a
+local reproducibility check, not an official competition score or a
+guarantee of qualification.
