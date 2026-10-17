@@ -1,0 +1,77 @@
+{
+  "run_id": "smoke-001",
+  "started_at": "2026-10-17T04:59:49.814786Z",
+  "completed_at": "2026-10-17T05:01:42.146562Z",
+  "expected_count": 100,
+  "emitted_envelopes": 100,
+  "resumed_profiles": 0,
+  "profiles_fetched_this_run": 100,
+  "modules": [
+    "registry",
+    "accounting_obligation",
+    "registry_live",
+    "financials",
+    "roles",
+    "group",
+    "locations",
+    "website"
+  ],
+  "registry": {
+    "registry_snapshot_sha256": "3183a281f41cd9859f93a6955b417808dc949c658c036d1c6128fde83bea104e",
+    "registry_rows_scanned": 1174176,
+    "requested": 100,
+    "selected": 100
+  },
+  "operations": {
+    "requests": 538,
+    "bytes": 2448448,
+    "worker_failures": 0,
+    "request_metrics_complete": true,
+    "bytes_metrics_complete": true,
+    "latency_metrics_complete": true,
+    "p50_ms": 689,
+    "p95_ms": 720
+  },
+  "validation": {
+    "passed": true,
+    "checks": {
+      "internal_exact_expected_count": true,
+      "internal_unique_organisation_numbers": true,
+      "internal_all_entity_states_terminal": true,
+      "internal_all_module_states_terminal": true,
+      "internal_zero_silent_drops": true,
+      "contract_exact_expected_count": true,
+      "contract_unique_organisation_numbers": true,
+      "contract_required_sections_present": true,
+      "contract_legal_identity_matches_envelope": true,
+      "contract_all_claim_states_allowed": true,
+      "contract_all_claim_evidence_references_resolve": true
+    },
+    "internal_validation": {
+      "passed": true,
+      "checks": {
+        "exact_expected_count": true,
+        "unique_organisation_numbers": true,
+        "all_entity_states_terminal": true,
+        "all_module_states_terminal": true,
+        "zero_silent_drops": true
+      },
+      "invalid_states": []
+    },
+    "contract_validation": {
+      "passed": true,
+      "checks": {
+        "exact_expected_count": true,
+        "unique_organisation_numbers": true,
+        "required_sections_present": true,
+        "legal_identity_matches_envelope": true,
+        "all_claim_states_allowed": true,
+        "all_claim_evidence_references_resolve": true
+      },
+      "invalid_states": [],
+      "dangling_evidence_refs": [],
+      "missing_sections": [],
+      "identity_errors": []
+    }
+  }
+}
