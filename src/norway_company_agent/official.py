@@ -24,28 +24,49 @@ _history_lock = threading.Lock()
 _history_last_request = 0.0
 
 
-def accounting_obligation_assessment(profile: dict[str, Any]) -> dict[str, Any]:
-    """Classify the rule path without inventing a definitive exemption.
 
-    Brreg's public rule is categorical for some forms and threshold/activity dependent for others.
-    Registry employee counts are not treated as equivalent to statutory man-years or asset/revenue tests.
+def accounting_obligation_assessment(
+    profile: dict[str, Any],
+) -> dict[str, Any]:
+    """Classify accounting-obligation status using a versioned local ruleset.
+
+    The ruleset hash identifies local rule logic. It is not a hash of
+    the linked Brønnøysund Register Centre webpage.
     """
     legal_form = str(profile.get("legal_form") or "").upper()
     latest = profile.get("latest_submitted_accounts")
+
     if latest:
         classification = "filing_observed"
-        reason = "The registry snapshot reports a latest submitted annual-account year."
+        reason = (
+            "The registry snapshot reports a latest submitted "
+            "annual-account year."
+        )
     elif legal_form in ALWAYS_ACCOUNTING_OBLIGED_FORMS:
         classification = "required_by_legal_form"
-        reason = f"Brreg lists organisation form {legal_form} in an always-obliged category."
+        reason = (
+            f"Brreg lists organisation form {legal_form} "
+            "in an always-obliged category."
+        )
     elif legal_form in THRESHOLD_OR_ACTIVITY_FORMS:
         classification = "threshold_or_activity_dependent"
-        reason = "Obligation depends on statutory size, partner, activity, tax or supervision tests not fully present in the open entity row."
+        reason = (
+            "Obligation depends on statutory size, partner, activity, "
+            "tax or supervision tests not fully present in the open "
+            "entity row."
+        )
     else:
         classification = "special_rule_or_review_required"
-        reason = "The open entity row is insufficient for a definitive accounting-obligation decision."
-    ruleset_hash = __import__("hashlib").sha256(ACCOUNTING_RULESET_VERSION.encode()).hexdigest()
-    return evidence(
+        reason = (
+            "The open entity row is insufficient for a definitive "
+            "accounting-obligation decision."
+        )
+
+    ruleset_hash = __import__("hashlib").sha256(
+        ACCOUNTING_RULESET_VERSION.encode()
+    ).hexdigest()
+
+    record = evidence(
         "accounting_obligation",
         "available",
         "official_rule_interpretation",
@@ -58,9 +79,18 @@ def accounting_obligation_assessment(profile: dict[str, Any]) -> dict[str, Any]:
             "ruleset_version": ACCOUNTING_RULESET_VERSION,
         },
         as_of="2024-08-09",
-        content_sha256=ruleset_hash,
-        source_row_key=str(profile.get("organisation_number") or "") or None,
+        source_row_key=str(
+            profile.get("organisation_number") or ""
+        ) or None,
+        note=(
+            "Locally applied ruleset. The linked guidance page was not "
+            "fetched during this run. ruleset_sha256 hashes the local "
+            "ruleset identifier, not the webpage contents."
+        ),
     )
+
+    record["ruleset_sha256"] = ruleset_hash
+    return record
 
 
 def _get(value: Any, *path: str) -> Any:
@@ -170,12 +200,53 @@ def normalize_entity(body: Any) -> dict[str, Any]:
     }
 
 
-def _classified(field: str, source_type: str, result: FetchResult, value: Any = None) -> dict[str, Any]:
+
+def _classified(
+    field: str,
+    source_type: str,
+    result: FetchResult,
+    value: Any = None,
+) -> dict[str, Any]:
     if result.status == 200:
-        return evidence(field, "available", source_type, result.url, value=result.body if value is None else value, content_sha256=result.content_sha256, retrieved_at=result.retrieved_at, effective_at=result.effective_at)
-    if result.status in {404, 410}:
-        return evidence(field, "not_found", source_type, result.url, note=result.error, content_sha256=result.content_sha256, retrieved_at=result.retrieved_at, effective_at=result.effective_at)
-    return evidence(field, "source_error", source_type, result.url, note=result.error, content_sha256=result.content_sha256, retrieved_at=result.retrieved_at, effective_at=result.effective_at)
+        record = evidence(
+            field,
+            "available",
+            source_type,
+            result.url,
+            value=result.body if value is None else value,
+            content_sha256=result.content_sha256,
+            retrieved_at=result.retrieved_at,
+            effective_at=result.effective_at,
+        )
+    elif result.status in {404, 410}:
+        record = evidence(
+            field,
+            "not_found",
+            source_type,
+            result.url,
+            note=result.error,
+            content_sha256=result.content_sha256,
+            retrieved_at=result.retrieved_at,
+            effective_at=result.effective_at,
+        )
+    else:
+        record = evidence(
+            field,
+            "source_error",
+            source_type,
+            result.url,
+            note=result.error,
+            content_sha256=result.content_sha256,
+            retrieved_at=result.retrieved_at,
+            effective_at=result.effective_at,
+        )
+
+    # Preserve an exact excerpt of the fetched response.
+    # Do not add an ellipsis, since it would not be source text.
+    if result.raw_text:
+        record["claim_span"] = result.raw_text[:6000]
+
+    return record
 
 
 def fetch_official_modules(org: str, modules: set[str], fetcher: Callable[[str], FetchResult] = fetch_json) -> tuple[dict[str, Any], list[FetchResult]]:

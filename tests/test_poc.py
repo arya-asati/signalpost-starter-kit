@@ -1045,7 +1045,12 @@ class OfficialNormalizationTests(unittest.TestCase):
         sole_trader = accounting_obligation_assessment({"organisation_number": "923609017", "legal_form": "ENK", "employees": 0})
         self.assertEqual(company["value"]["classification"], "required_by_legal_form")
         self.assertEqual(sole_trader["value"]["classification"], "threshold_or_activity_dependent")
-        self.assertTrue(company["content_sha256"])
+        self.assertIsNone(company.get("content_sha256"))
+        self.assertRegex(
+            company["ruleset_sha256"],
+            r"^[0-9a-f]{64}$",
+            )
+        self.assertIn("not fetched", company["note"])
         self.assertEqual(company["source_row_key"], "923609016")
 
     def test_observed_filing_overrides_rule_path(self):

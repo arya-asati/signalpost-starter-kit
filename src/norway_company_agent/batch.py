@@ -68,17 +68,28 @@ def profiles_from_bulk(path: str | Path, organisation_numbers: Iterable[str]) ->
         if org not in wanted:
             continue
         raw = profile.pop("raw", {})
+        source_row_text = raw.pop(
+    "__signalpost_source_row_text__",
+    None,
+)
         profile["evidence"] = {
-            "registry": evidence(
-                "registry",
-                "available",
-                "official_registry_bulk",
-                "https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv",
-                value=raw,
-                retrieved_at=retrieved_at,
-                content_sha256=snapshot_sha256,
-                source_row_key=org,
-            ),
+            "registry": {
+    **evidence(
+        "registry",
+        "available",
+        "official_registry_bulk",
+        "https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv",
+        value=raw,
+        retrieved_at=retrieved_at,
+        content_sha256=snapshot_sha256,
+        source_row_key=org,
+    ),
+    **(
+        {"claim_span": source_row_text}
+        if source_row_text
+        else {}
+    ),
+},
             "accounting_obligation": accounting_obligation_assessment(profile),
         }
         found[org] = profile

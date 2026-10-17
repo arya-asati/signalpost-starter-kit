@@ -117,6 +117,9 @@ def _evidence_item(
     source_url = record.get("source_url")
     retrieved_at = record.get("retrieved_at")
     content_hash = record.get("content_sha256")
+    source_row_key = record.get("source_row_key")
+    if source_row_key:
+        item["source_row_key"] = source_row_key
     for key in ("as_of", "effective_at"):
         if record.get(key):
             item[key] = record[key]
@@ -129,6 +132,9 @@ def _evidence_item(
 
     if content_hash:
         item["content_sha256"] = content_hash
+    ruleset_hash = record.get("ruleset_sha256")
+    if ruleset_hash:
+        item["ruleset_sha256"] = ruleset_hash
 
     if record.get("claim_span"):
         item["claim_span"] = record["claim_span"]

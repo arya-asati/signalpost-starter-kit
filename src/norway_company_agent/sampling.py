@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import csv
@@ -26,37 +27,93 @@ def normalize_row(row: dict[str, str]) -> dict[str, Any]:
         employees = int(employees_raw) if employees_raw else None
     except ValueError:
         employees = None
+
     return {
         "organisation_number": org,
         "name": _first(row, "navn", "Navn"),
-        "legal_form": _first(row, "organisasjonsform.kode", "Organisasjonsform.kode"),
+        "legal_form": _first(
+            row,
+            "organisasjonsform.kode",
+            "Organisasjonsform.kode",
+        ),
         "employees": employees,
         "bankrupt": _first(row, "konkurs", "Konkurs").lower() == "true",
-        "liquidating": _first(row, "underAvvikling", "Under avvikling").lower() == "true",
-        "municipality": _first(row, "forretningsadresse.kommune", "Forretningsadresse.kommune"),
-        "municipality_number": _first(row, "forretningsadresse.kommunenummer", "Forretningsadresse.kommunenummer"),
-        "industry_code": _first(row, "naeringskode1.kode", "Næringskode1.kode"),
-        "industry_label": _first(row, "naeringskode1.beskrivelse", "Næringskode1.beskrivelse"),
+        "liquidating": _first(
+            row,
+            "underAvvikling",
+            "Under avvikling",
+        ).lower() == "true",
+        "municipality": _first(
+            row,
+            "forretningsadresse.kommune",
+            "Forretningsadresse.kommune",
+        ),
+        "municipality_number": _first(
+            row,
+            "forretningsadresse.kommunenummer",
+            "Forretningsadresse.kommunenummer",
+        ),
+        "industry_code": _first(
+            row,
+            "naeringskode1.kode",
+            "Næringskode1.kode",
+        ),
+        "industry_label": _first(
+            row,
+            "naeringskode1.beskrivelse",
+            "Næringskode1.beskrivelse",
+        ),
         "website": _first(row, "hjemmeside", "Hjemmeside"),
-        "latest_submitted_accounts": _first(row, "sisteInnsendteAarsregnskap", "Siste innsendte årsregnskap"),
+        "latest_submitted_accounts": _first(
+            row,
+            "sisteInnsendteAarsregnskap",
+            "Siste innsendte årsregnskap",
+        ),
         "raw": row,
     }
 
 
 def stratum(record: dict[str, Any]) -> str:
-    form = record["legal_form"] if record["legal_form"] in {"AS", "ASA", "ENK"} else "OTHER"
+    form = (
+        record["legal_form"]
+        if record["legal_form"] in {"AS", "ASA", "ENK"}
+        else "OTHER"
+    )
     employees = record["employees"]
-    employee_band = "missing" if employees is None else "0" if employees == 0 else "1-4" if employees < 5 else "5-19" if employees < 20 else "20-99" if employees < 100 else "100+"
-    state = "adverse" if record["bankrupt"] or record["liquidating"] else "active"
+    employee_band = (
+        "missing"
+        if employees is None
+        else "0"
+        if employees == 0
+        else "1-4"
+        if employees < 5
+        else "5-19"
+        if employees < 20
+        else "20-99"
+        if employees < 100
+        else "100+"
+    )
+    state = (
+        "adverse"
+        if record["bankrupt"] or record["liquidating"]
+        else "active"
+    )
     web = "web" if record["website"] else "no-web"
     return "|".join([form, employee_band, state, web])
 
 
-def financial_filer_eligible(record: dict[str, Any], latest_year: str, *, active_only: bool = True) -> bool:
+def financial_filer_eligible(
+    record: dict[str, Any],
+    latest_year: str,
+    *,
+    active_only: bool = True,
+) -> bool:
     """Return whether a registry row belongs to the frozen financial-filer universe."""
     if str(record.get("latest_submitted_accounts") or "") != str(latest_year):
         return False
-    if active_only and (record.get("bankrupt") or record.get("liquidating")):
+    if active_only and (
+        record.get("bankrupt") or record.get("liquidating")
+    ):
         return False
     return True
 
@@ -65,10 +122,32 @@ def financial_filer_stratum(record: dict[str, Any]) -> str:
     """Compact reporting stratum for representation checks, not eligibility."""
     legal_form = str(record.get("legal_form") or "missing")
     employees = record.get("employees")
-    employee_band = "missing" if employees is None else "0" if employees == 0 else "1-4" if employees < 5 else "5-19" if employees < 20 else "20-99" if employees < 100 else "100+"
-    industry_division = str(record.get("industry_code") or "missing").split(".", 1)[0]
+    employee_band = (
+        "missing"
+        if employees is None
+        else "0"
+        if employees == 0
+        else "1-4"
+        if employees < 5
+        else "5-19"
+        if employees < 20
+        else "20-99"
+        if employees < 100
+        else "100+"
+    )
+    industry_division = (
+        str(record.get("industry_code") or "missing").split(".", 1)[0]
+    )
     geography = str(record.get("municipality_number") or "missing")[:2]
-    return "|".join([legal_form, employee_band, industry_division, geography, "web" if record.get("website") else "no-web"])
+    return "|".join(
+        [
+            legal_form,
+            employee_band,
+            industry_division,
+            geography,
+            "web" if record.get("website") else "no-web",
+        ]
+    )
 
 
 def deterministic_financial_filer_sample(
@@ -92,34 +171,73 @@ def deterministic_financial_filer_sample(
     heap: list[tuple[int, str, dict[str, Any]]] = []
     registry_rows = 0
     eligible_rows = 0
+
     for record in iter_bulk(path):
         registry_rows += 1
-        if not financial_filer_eligible(record, latest_year) or record["organisation_number"] in excluded:
+        if (
+            not financial_filer_eligible(record, latest_year)
+            or record["organisation_number"] in excluded
+        ):
             continue
+
         eligible_rows += 1
         org = record["organisation_number"]
+
         if org in preserved:
             preserved_rows[org] = record
             continue
-        rank = int(hashlib.sha256(f"{seed}:{org}".encode()).hexdigest(), 16)
+
+        rank = int(
+            hashlib.sha256(f"{seed}:{org}".encode()).hexdigest(),
+            16,
+        )
         item = (-rank, org, record)
+
         if len(heap) < count:
             heapq.heappush(heap, item)
         elif rank < -heap[0][0]:
             heapq.heapreplace(heap, item)
 
     retained = [preserved_rows[org] for org in sorted(preserved_rows)]
+
     if len(retained) > count:
-        retained = sorted(retained, key=lambda item: hashlib.sha256(f"{seed}:preserved:{item['organisation_number']}".encode()).hexdigest())[:count]
+        retained = sorted(
+            retained,
+            key=lambda item: hashlib.sha256(
+                f"{seed}:preserved:{item['organisation_number']}".encode()
+            ).hexdigest(),
+        )[:count]
+
     needed = count - len(retained)
-    ranked = [item[2] for item in sorted(heap, key=lambda item: (-item[0], item[1]))]
+    ranked = [
+        item[2]
+        for item in sorted(heap, key=lambda item: (-item[0], item[1]))
+    ]
     selected = retained + ranked[:needed]
-    selected = sorted(selected, key=lambda item: hashlib.sha256(f"{seed}:order:{item['organisation_number']}".encode()).hexdigest())
+    selected = sorted(
+        selected,
+        key=lambda item: hashlib.sha256(
+            f"{seed}:order:{item['organisation_number']}".encode()
+        ).hexdigest(),
+    )
+
     development = round(count * 0.6)
     validation = round(count * 0.2)
+
     for index, item in enumerate(selected):
-        item["sample_slice"] = "preserved_eligible" if item["organisation_number"] in preserved_rows else "financial_filer_population"
-        item["evaluation_split"] = "development" if index < development else "validation" if index < development + validation else "held_out"
+        item["sample_slice"] = (
+            "preserved_eligible"
+            if item["organisation_number"] in preserved_rows
+            else "financial_filer_population"
+        )
+        item["evaluation_split"] = (
+            "development"
+            if index < development
+            else "validation"
+            if index < development + validation
+            else "held_out"
+        )
+
     selected_orgs = {item["organisation_number"] for item in selected}
     metadata = {
         "seed": seed,
@@ -133,27 +251,99 @@ def deterministic_financial_filer_sample(
         "preserved_eligible_selected": len(selected_orgs & preserved),
         "excluded_organisation_numbers": len(excluded),
         "overlap_with_excluded": len(selected_orgs & excluded),
-        "selected_sha256": hashlib.sha256("\n".join(sorted(selected_orgs)).encode()).hexdigest(),
-        "evaluation_splits": dict(sorted(__import__("collections").Counter(item["evaluation_split"] for item in selected).items())),
-        "legal_form_counts": dict(sorted(__import__("collections").Counter(item["legal_form"] or "missing" for item in selected).items())),
-        "financial_stratum_counts": dict(sorted(__import__("collections").Counter(financial_filer_stratum(item) for item in selected).items())),
+        "selected_sha256": hashlib.sha256(
+            "\n".join(sorted(selected_orgs)).encode()
+        ).hexdigest(),
+        "evaluation_splits": dict(
+            sorted(
+                __import__("collections").Counter(
+                    item["evaluation_split"] for item in selected
+                ).items()
+            )
+        ),
+        "legal_form_counts": dict(
+            sorted(
+                __import__("collections").Counter(
+                    item["legal_form"] or "missing" for item in selected
+                ).items()
+            )
+        ),
+        "financial_stratum_counts": dict(
+            sorted(
+                __import__("collections").Counter(
+                    financial_filer_stratum(item) for item in selected
+                ).items()
+            )
+        ),
     }
     return selected, metadata
 
 
+class _CapturedLineIterator:
+    """Capture the physical CSV lines consumed for each logical CSV record."""
+
+    def __init__(self, source: Any) -> None:
+        self.source = source
+        self.lines: list[str] = []
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> str:
+        line = next(self.source)
+        self.lines.append(line)
+        return line
+
+
 def iter_bulk(path: str | Path) -> Iterable[dict[str, Any]]:
-    with gzip.open(path, "rt", encoding="utf-8-sig", newline="") as handle:
+    """Read registry CSV rows while retaining their original source text."""
+    with gzip.open(
+        path,
+        "rt",
+        encoding="utf-8-sig",
+        newline="",
+    ) as handle:
         sample = handle.read(8192)
         handle.seek(0)
-        dialect = csv.Sniffer().sniff(sample, delimiters=";,\t")
-        for row in csv.DictReader(handle, dialect=dialect):
+
+        dialect = csv.Sniffer().sniff(
+            sample,
+            delimiters=";,\t",
+        )
+
+        captured = _CapturedLineIterator(handle)
+        reader = csv.DictReader(captured, dialect=dialect)
+
+        # Reading fieldnames consumes the header line.
+                # Preserve the original header so source values remain identifiable.
+        _ = reader.fieldnames
+        header_text = "".join(captured.lines).rstrip("\r\n")
+        captured.lines.clear()
+
+        for row in reader:
+            source_row_text = "".join(captured.lines).rstrip("\r\n")
+            captured.lines.clear()
+
             record = normalize_row(row)
+
+            # Internal metadata for profiles_from_bulk() to remove and promote
+            # to an evidence field. Do not treat this as a source CSV column.
+            record["raw"]["__signalpost_source_row_text__"] = (
+                f"{header_text}\n{source_row_text}"
+                if header_text
+                else source_row_text
+            )
+
             if len(record["organisation_number"]) == 9:
                 yield record
 
 
-def deterministic_sample(path: str | Path, count: int, seed: int = 20260822) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    # Keep one population reservoir plus bounded stress reservoirs. Report the slices separately.
+def deterministic_sample(
+    path: str | Path,
+    count: int,
+    seed: int = 20260822,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    # Keep one population reservoir plus bounded stress reservoirs.
     rng = random.Random(seed)
     population_count = round(count * 0.7)
     stress_count = count - population_count
@@ -163,17 +353,20 @@ def deterministic_sample(path: str | Path, count: int, seed: int = 20260822) -> 
     seen: dict[str, int] = defaultdict(int)
     total = 0
     hasher = hashlib.sha256()
+
     for record in iter_bulk(path):
         total += 1
         key = stratum(record)
         seen[key] += 1
         hasher.update(record["organisation_number"].encode())
+
         if len(population) < population_count:
             population.append(record)
         else:
             position = rng.randrange(total)
             if position < population_count:
                 population[position] = record
+
         bucket = reservoirs[key]
         if len(bucket) < reservoir_size:
             bucket.append(record)
@@ -184,41 +377,105 @@ def deterministic_sample(path: str | Path, count: int, seed: int = 20260822) -> 
 
     for item in population:
         item["sample_slice"] = "population"
+
     chosen: list[dict[str, Any]] = list(population)
     chosen_orgs = {item["organisation_number"] for item in chosen}
     keys = sorted(reservoirs)
     minimum = max(1, min(3, stress_count // max(1, len(keys))))
+
     for key in keys:
         rng.shuffle(reservoirs[key])
-        additions = [item for item in reservoirs[key] if item["organisation_number"] not in chosen_orgs][:minimum]
+        additions = [
+            item
+            for item in reservoirs[key]
+            if item["organisation_number"] not in chosen_orgs
+        ][:minimum]
+
         for item in additions:
             item["sample_slice"] = "stress"
             chosen_orgs.add(item["organisation_number"])
+
         chosen.extend(additions)
-    candidates = [item for key in keys for item in reservoirs[key][minimum:] if item["organisation_number"] not in chosen_orgs]
+
+    candidates = [
+        item
+        for key in keys
+        for item in reservoirs[key][minimum:]
+        if item["organisation_number"] not in chosen_orgs
+    ]
     rng.shuffle(candidates)
-    additions = candidates[: max(0, count - len(chosen))]
+    additions = candidates[:max(0, count - len(chosen))]
+
     for item in additions:
         item["sample_slice"] = "stress"
+
     chosen.extend(additions)
     chosen = chosen[:count]
-    split_counts = {"development": round(count * 0.6), "validation": round(count * 0.2)}
-    by_hash = sorted(chosen, key=lambda item: hashlib.sha256(f"{seed}:{item['organisation_number']}".encode()).hexdigest())
+    split_counts = {
+        "development": round(count * 0.6),
+        "validation": round(count * 0.2),
+    }
+    by_hash = sorted(
+        chosen,
+        key=lambda item: hashlib.sha256(
+            f"{seed}:{item['organisation_number']}".encode()
+        ).hexdigest(),
+    )
+
     for index, item in enumerate(by_hash):
-        item["evaluation_split"] = "development" if index < split_counts["development"] else "validation" if index < split_counts["development"] + split_counts["validation"] else "held_out"
+        item["evaluation_split"] = (
+            "development"
+            if index < split_counts["development"]
+            else "validation"
+            if index < split_counts["development"] + split_counts["validation"]
+            else "held_out"
+        )
+
     metadata = {
         "seed": seed,
         "requested": count,
         "selected": len(chosen),
-        "population_selected": sum(item["sample_slice"] == "population" for item in chosen),
-        "stress_selected": sum(item["sample_slice"] == "stress" for item in chosen),
-        "evaluation_splits": dict(sorted(__import__("collections").Counter(item["evaluation_split"] for item in chosen).items())),
+        "population_selected": sum(
+            item["sample_slice"] == "population" for item in chosen
+        ),
+        "stress_selected": sum(
+            item["sample_slice"] == "stress" for item in chosen
+        ),
+        "evaluation_splits": dict(
+            sorted(
+                __import__("collections").Counter(
+                    item["evaluation_split"] for item in chosen
+                ).items()
+            )
+        ),
         "registry_rows": total,
         "registry_org_sequence_sha256": hasher.hexdigest(),
         "stratum_counts": dict(sorted(seen.items())),
-        "selected_stratum_counts": dict(sorted(__import__("collections").Counter(stratum(item) for item in chosen).items())),
-        "population_stratum_counts": dict(sorted(__import__("collections").Counter(stratum(item) for item in chosen if item["sample_slice"] == "population").items())),
-        "stress_stratum_counts": dict(sorted(__import__("collections").Counter(stratum(item) for item in chosen if item["sample_slice"] == "stress").items())),
+        "selected_stratum_counts": dict(
+            sorted(
+                __import__("collections").Counter(
+                    stratum(item) for item in chosen
+                ).items()
+            )
+        ),
+        "population_stratum_counts": dict(
+            sorted(
+                __import__("collections").Counter(
+                    stratum(item)
+                    for item in chosen
+                    if item["sample_slice"] == "population"
+                ).items()
+            )
+        ),
+        "stress_stratum_counts": dict(
+            sorted(
+                __import__("collections").Counter(
+                    stratum(item)
+                    for item in chosen
+                    if item["sample_slice"] == "stress"
+                ).items()
+            )
+        ),
     }
     return chosen, metadata
 
@@ -233,23 +490,37 @@ def deterministic_extension_sample(
     heap: list[tuple[int, str, dict[str, Any]]] = []
     registry_rows = 0
     eligible_rows = 0
+
     for record in iter_bulk(path):
         registry_rows += 1
         org = record["organisation_number"]
+
         if org in excluded_organisation_numbers:
             continue
+
         eligible_rows += 1
-        rank = int(hashlib.sha256(f"{seed}:{org}".encode()).hexdigest(), 16)
+        rank = int(
+            hashlib.sha256(f"{seed}:{org}".encode()).hexdigest(),
+            16,
+        )
         item = (-rank, org, record)
+
         if len(heap) < count:
             heapq.heappush(heap, item)
         elif rank < -heap[0][0]:
             heapq.heapreplace(heap, item)
-    selected = [item[2] for item in sorted(heap, key=lambda item: (-item[0], item[1]))]
+
+    selected = [
+        item[2]
+        for item in sorted(heap, key=lambda item: (-item[0], item[1]))
+    ]
+
     for item in selected:
         item["sample_slice"] = "extension"
         item["evaluation_split"] = "extension_holdout"
+
     selected_orgs = {item["organisation_number"] for item in selected}
+
     return selected, {
         "seed": seed,
         "requested": count,
@@ -257,10 +528,26 @@ def deterministic_extension_sample(
         "registry_rows": registry_rows,
         "eligible_rows_after_exclusion": eligible_rows,
         "excluded_organisation_numbers": len(excluded_organisation_numbers),
-        "overlap_with_excluded": len(selected_orgs & excluded_organisation_numbers),
-        "selected_sha256": hashlib.sha256("\n".join(sorted(selected_orgs)).encode()).hexdigest(),
-        "selected_stratum_counts": dict(sorted(__import__("collections").Counter(stratum(item) for item in selected).items())),
-        "legal_form_counts": dict(sorted(__import__("collections").Counter(item["legal_form"] or "missing" for item in selected).items())),
+        "overlap_with_excluded": len(
+            selected_orgs & excluded_organisation_numbers
+        ),
+        "selected_sha256": hashlib.sha256(
+            "\n".join(sorted(selected_orgs)).encode()
+        ).hexdigest(),
+        "selected_stratum_counts": dict(
+            sorted(
+                __import__("collections").Counter(
+                    stratum(item) for item in selected
+                ).items()
+            )
+        ),
+        "legal_form_counts": dict(
+            sorted(
+                __import__("collections").Counter(
+                    item["legal_form"] or "missing" for item in selected
+                ).items()
+            )
+        ),
     }
 
 
@@ -276,30 +563,48 @@ def deterministic_website_audit_sample(
     registry_rows = 0
     website_rows = 0
     hasher = hashlib.sha256()
+
     for record in iter_bulk(path):
         registry_rows += 1
         hasher.update(record["organisation_number"].encode())
-        if not record.get("website") or record["organisation_number"] in excluded_organisation_numbers:
+
+        if (
+            not record.get("website")
+            or record["organisation_number"] in excluded_organisation_numbers
+        ):
             continue
+
         website_rows += 1
-        minimal = {key: value for key, value in record.items() if key != "raw"}
-        rank = hashlib.sha256(f"{seed}:{record['organisation_number']}".encode()).hexdigest()
+        minimal = {
+            key: value
+            for key, value in record.items()
+            if key != "raw"
+        }
+        rank = hashlib.sha256(
+            f"{seed}:{record['organisation_number']}".encode()
+        ).hexdigest()
         candidates.append((rank, minimal))
 
     selected: list[dict[str, Any]] = []
     seen_hosts: set[str] = set(excluded_website_hosts or set())
     selected_hosts: set[str] = set()
+
     for _, record in sorted(candidates, key=lambda item: item[0]):
         supplied = str(record["website"]).strip()
-        parsed = urllib.parse.urlparse(supplied if "://" in supplied else "https://" + supplied)
+        parsed = urllib.parse.urlparse(
+            supplied if "://" in supplied else "https://" + supplied
+        )
         host = (parsed.hostname or "").casefold().removeprefix("www.")
+
         if not host or host in seen_hosts:
             continue
+
         seen_hosts.add(host)
         selected_hosts.add(host)
         record["sample_slice"] = "fresh_website_audit"
         record["evaluation_split"] = "independent_final"
         selected.append(record)
+
         if len(selected) == count:
             break
 
