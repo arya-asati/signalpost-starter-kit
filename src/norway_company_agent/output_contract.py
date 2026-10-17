@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import hashlib
@@ -56,19 +57,16 @@ def availability_from_evidence(
 ) -> str:
     """Map internal evidence statuses to contract availability states."""
 
-    # Preserve official states that are already supplied.
     if status in AVAILABILITY_STATES and status != "available":
         return status
 
-    # Map the starter's internal statuses to official states.
     if status != "available":
         return STATUS_MAP.get(status or "", "failed")
 
-    # An empty list can be a successful check with zero results.
+    # A successfully checked source can legitimately return no results.
     if isinstance(value, list):
         return "available"
 
-    # Missing values are not converted into zero.
     if value is None:
         return "not_available"
 
@@ -78,7 +76,7 @@ def availability_from_evidence(
     if isinstance(value, dict) and not value:
         return "not_available"
 
-    # Preserve meaningful values such as 0 and False.
+    # Preserve meaningful values such as zero and False.
     return "available"
 
 
@@ -95,9 +93,8 @@ def _evidence_id(
             str(record.get("content_sha256") or ""),
         )
     )
-    return "ev-" + hashlib.sha256(
-        identity.encode("utf-8")
-    ).hexdigest()[:16]
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return "ev-" + digest[:16]
 
 
 def _evidence_item(
@@ -114,33 +111,21 @@ def _evidence_item(
         ),
     }
 
-    source_url = record.get("source_url")
-    retrieved_at = record.get("retrieved_at")
-    content_hash = record.get("content_sha256")
-    source_row_key = record.get("source_row_key")
-    if source_row_key:
-        item["source_row_key"] = source_row_key
-    for key in ("as_of", "effective_at"):
-        if record.get(key):
-            item[key] = record[key]
-
-    if source_url:
-        item["source_url"] = source_url
-
-    if retrieved_at:
-        item["retrieved_at"] = retrieved_at
-
-    if content_hash:
-        item["content_sha256"] = content_hash
-    ruleset_hash = record.get("ruleset_sha256")
-    if ruleset_hash:
-        item["ruleset_sha256"] = ruleset_hash
-
-    if record.get("claim_span"):
-        item["claim_span"] = record["claim_span"]
-
-    if record.get("note"):
-        item["note"] = record["note"]
+    for key in (
+        "source_url",
+        "reference_url",
+        "retrieved_at",
+        "content_sha256",
+        "source_row_key",
+        "ruleset_sha256",
+        "as_of",
+        "effective_at",
+        "claim_span",
+        "note",
+    ):
+        value = record.get(key)
+        if value is not None and value != "":
+            item[key] = value
 
     return item
 
@@ -161,12 +146,10 @@ def _flatten(
         if not visible:
             return [(prefix, value)] if not value else []
 
-        result = []
+        result: list[tuple[str, Any]] = []
 
         for key, child in visible.items():
-            result.extend(
-                _flatten(f"{prefix}.{key}", child)
-            )
+            result.extend(_flatten(f"{prefix}.{key}", child))
 
         return result
 
@@ -174,12 +157,10 @@ def _flatten(
         if not value:
             return [(prefix, [])]
 
-        result = []
+        result: list[tuple[str, Any]] = []
 
         for index, child in enumerate(value):
-            result.extend(
-                _flatten(f"{prefix}[{index}]", child)
-            )
+            result.extend(_flatten(f"{prefix}[{index}]", child))
 
         return result
 
@@ -193,7 +174,7 @@ def _claim(
     evidence_ids: list[str],
     confidence: float | None = None,
 ) -> dict[str, Any]:
-    """Build a claim without turning missing values into facts."""
+    """Build a claim without converting missing values into facts."""
 
     if availability == "not_available":
         value = None
@@ -207,6 +188,70 @@ def _claim(
     }
 
 
+def _confidence_for_claim(
+    claim: dict[str, Any],
+    evidence_by_id: dict[str, dict[str, Any]],
+) -> float:
+    """
+    Return an explicit provenance heuristic, not a calibrated probability.
+
+    These values have not been statistically calibrated against independently
+    labelled claims. Do not describe them as calibrated probabilities.
+    """
+
+    availability = claim.get("availability")
+    value = claim.get("value")
+
+    if availability == "ambiguous":
+        return 0.40 if value is not None else 0.0
+
+    if availability != "available" or value is None:
+        return 0.0
+
+    source_scores = {
+        "official_registry_bulk": 0.95,
+        "official_registry_live": 0.95,
+        "official_annual_accounts": 0.95,
+        "official_annual_account_copies": 0.90,
+        "official_roles": 0.90,
+        "official_group_structure": 0.90,
+        "official_subunits": 0.90,
+        "registry_linked_company_website": 0.80,
+        "local_ruleset_interpretation": 0.75,
+        # Support older evidence records during migration.
+        "official_rule_interpretation": 0.75,
+    }
+
+    referenced = [
+        evidence_by_id[evidence_id]
+        for evidence_id in claim.get("evidence_ids", [])
+        if evidence_id in evidence_by_id
+    ]
+
+    if not referenced:
+        return 0.0
+
+    scores: list[float] = []
+
+    for item in referenced:
+        source_class = item.get("source_class") or "unknown"
+        score = source_scores.get(source_class, 0.50)
+
+        # An external claim without a usable excerpt gets a conservative cap.
+        if (
+            item.get("source_url")
+            and source_class != "local_ruleset_interpretation"
+            and source_class != "official_rule_interpretation"
+            and not str(item.get("claim_span") or "").strip()
+        ):
+            score = min(score, 0.65)
+
+        scores.append(score)
+
+    # If multiple sources support a claim, use the lowest provenance score.
+    return min(scores)
+
+
 def _claims_for_record(
     organisation_number: str,
     module: str,
@@ -216,6 +261,22 @@ def _claims_for_record(
 ) -> list[dict[str, Any]]:
     status = record.get("status")
     evidence_ids = [evidence_id]
+
+    # Accounting classification depends on local rules and registry inputs.
+    # Link both evidence records, rather than attributing all facts solely
+    # to the ruleset interpretation.
+    if module == "accounting_obligation":
+        registry_record = (profile.get("evidence") or {}).get("registry")
+
+        if isinstance(registry_record, dict):
+            registry_evidence_id = _evidence_id(
+                organisation_number,
+                "registry",
+                registry_record,
+            )
+            evidence_ids = list(
+                dict.fromkeys([registry_evidence_id, evidence_id])
+            )
 
     if module == "website":
         value = record.get("value") or {}
@@ -237,15 +298,12 @@ def _claims_for_record(
                 )
             ]
 
-        # Do not publish website facts as verified until identity
-        # has passed the existing exact-company identity gate.
+        # Do not publish website facts as verified until identity has passed
+        # the existing exact-company identity gate.
         if assessment.get("publishable") is not True:
             availability = (
-                "ambiguous"
-                if website_url
-                else "not_available"
+                "ambiguous" if website_url else "not_available"
             )
-
             return [
                 _claim(
                     "official_website",
@@ -259,10 +317,7 @@ def _claims_for_record(
             _claim(
                 "official_website",
                 website_url,
-                availability_from_evidence(
-                    status,
-                    website_url,
-                ),
+                availability_from_evidence(status, website_url),
                 evidence_ids,
             )
         ]
@@ -273,10 +328,7 @@ def _claims_for_record(
                     _claim(
                         f"website.{key}",
                         value[key],
-                        availability_from_evidence(
-                            status,
-                            value[key],
-                        ),
+                        availability_from_evidence(status, value[key]),
                         evidence_ids,
                     )
                 )
@@ -369,26 +421,21 @@ def contract_envelope(
     )
 
     evidence_records = profile.get("evidence") or {}
-
     requested_modules = list(dict.fromkeys(modules))
-
     module_names = list(
-        dict.fromkeys(
-            requested_modules + list(evidence_records)
-        )
+        dict.fromkeys(requested_modules + list(evidence_records))
     )
 
-    evidence_items = []
-    claims = []
-    errors = []
-    seen_evidence_ids = set()
+    evidence_items: list[dict[str, Any]] = []
+    claims: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    seen_evidence_ids: set[str] = set()
 
     for module in module_names:
         record = evidence_records.get(module)
 
         if not record:
-            # This records a missing module as an internal execution
-            # event. It does not invent a website, source URL, or hash.
+            # Internal execution status, not invented external evidence.
             record = {
                 "field": module,
                 "status": "not_fetched",
@@ -410,11 +457,7 @@ def contract_envelope(
 
             if evidence_id not in seen_evidence_ids:
                 evidence_items.append(
-                    _evidence_item(
-                        evidence_id,
-                        record,
-                        module,
-                    )
+                    _evidence_item(evidence_id, record, module)
                 )
                 seen_evidence_ids.add(evidence_id)
 
@@ -436,7 +479,6 @@ def contract_envelope(
                     ),
                 }
             )
-
             continue
 
         evidence_id = _evidence_id(
@@ -447,11 +489,7 @@ def contract_envelope(
 
         if evidence_id not in seen_evidence_ids:
             evidence_items.append(
-                _evidence_item(
-                    evidence_id,
-                    record,
-                    module,
-                )
+                _evidence_item(evidence_id, record, module)
             )
             seen_evidence_ids.add(evidence_id)
 
@@ -465,10 +503,7 @@ def contract_envelope(
             )
         )
 
-        if record.get("status") in {
-            "source_error",
-            "not_fetched",
-        }:
+        if record.get("status") in {"source_error", "not_fetched"}:
             errors.append(
                 {
                     "field": module,
@@ -482,25 +517,14 @@ def contract_envelope(
             )
 
     metrics = profile.get("run_metrics") or {}
-
     cost = metrics.get("third_party_cost_usd")
 
-    if (
-        cost is None
-        and set(module_names).issubset(FREE_MODULES)
-    ):
+    if cost is None and set(module_names).issubset(FREE_MODULES):
         cost = 0.0
 
-    legal_identity = {
-        "organisation_number": organisation_number,
-    }
+    legal_identity = {"organisation_number": organisation_number}
 
-    for key in (
-        "name",
-        "legal_form",
-        "public_brand",
-        "industry",
-    ):
+    for key in ("name", "legal_form", "public_brand", "industry"):
         if profile.get(key) is not None:
             legal_identity[key] = profile[key]
 
@@ -510,11 +534,7 @@ def contract_envelope(
     for item in evidence_items:
         snapshot = {
             key: item[key]
-            for key in (
-                "source_url",
-                "retrieved_at",
-                "content_sha256",
-            )
+            for key in ("source_url", "retrieved_at", "content_sha256")
             if item.get(key)
         }
 
@@ -524,9 +544,22 @@ def contract_envelope(
             source_snapshots.append(snapshot)
             seen_snapshots.add(snapshot_key)
 
-    refresh_checked = bool(
-        profile.get("refresh_checked")
-    )
+    # Calculate transparent, heuristic confidence after the full evidence
+    # set has been assembled so references can be resolved.
+    evidence_by_id = {
+        item["id"]: item
+        for item in evidence_items
+        if item.get("id")
+    }
+
+    for claim in claims:
+        if claim.get("confidence") is None:
+            claim["confidence"] = _confidence_for_claim(
+                claim,
+                evidence_by_id,
+            )
+
+    refresh_checked = bool(profile.get("refresh_checked"))
 
     return {
         "organisation_number": organisation_number,
@@ -541,11 +574,7 @@ def contract_envelope(
         "evidence": evidence_items,
         "source_snapshots": source_snapshots,
         "refresh_metadata": {
-            "status": (
-                "checked"
-                if refresh_checked
-                else "not_checked"
-            ),
+            "status": "checked" if refresh_checked else "not_checked",
             "previous_snapshot_available": bool(
                 profile.get("previous_snapshot_available", False)
             ),
@@ -558,6 +587,8 @@ def contract_envelope(
             "third_party_cost_usd": cost,
         },
     }
+
+
 def validate_contract_envelopes(
     envelopes: list[dict[str, Any]],
     expected_count: int,
@@ -591,10 +622,12 @@ def validate_contract_envelopes(
         missing = sorted(required_sections - set(envelope))
 
         if missing:
-            missing_sections.append({
-                "index": envelope_index,
-                "missing": missing,
-            })
+            missing_sections.append(
+                {
+                    "index": envelope_index,
+                    "missing": missing,
+                }
+            )
 
         org = envelope.get("organisation_number")
         legal_identity = envelope.get("legal_identity") or {}
@@ -603,18 +636,19 @@ def validate_contract_envelopes(
             not org
             or legal_identity.get("organisation_number") != org
         ):
-            identity_errors.append({
-                "index": envelope_index,
-                "organisation_number": org,
-            })
+            identity_errors.append(
+                {
+                    "index": envelope_index,
+                    "organisation_number": org,
+                }
+            )
 
         evidence_rows = envelope.get("evidence") or []
-        evidence_ids = [
+        evidence_ids = {
             item.get("id")
             for item in evidence_rows
             if item.get("id")
-        ]
-        evidence_id_set = set(evidence_ids)
+        }
 
         claims = envelope.get("claims") or []
 
@@ -622,36 +656,41 @@ def validate_contract_envelopes(
             state = claim.get("availability")
 
             if state not in AVAILABILITY_STATES:
-                invalid_states.append({
-                    "organisation_number": org,
-                    "claim_index": claim_index,
-                    "state": state,
-                })
+                invalid_states.append(
+                    {
+                        "organisation_number": org,
+                        "claim_index": claim_index,
+                        "state": state,
+                    }
+                )
 
             refs = claim.get("evidence_ids")
 
             if not isinstance(refs, list) or not refs:
-                dangling_evidence_refs.append({
-                    "organisation_number": org,
-                    "claim_index": claim_index,
-                    "reason": "missing evidence references",
-                })
+                dangling_evidence_refs.append(
+                    {
+                        "organisation_number": org,
+                        "claim_index": claim_index,
+                        "reason": "missing evidence references",
+                    }
+                )
                 continue
 
             for evidence_id in refs:
-                if evidence_id not in evidence_id_set:
-                    dangling_evidence_refs.append({
-                        "organisation_number": org,
-                        "claim_index": claim_index,
-                        "evidence_id": evidence_id,
-                        "reason": "evidence reference not found",
-                    })
+                if evidence_id not in evidence_ids:
+                    dangling_evidence_refs.append(
+                        {
+                            "organisation_number": org,
+                            "claim_index": claim_index,
+                            "evidence_id": evidence_id,
+                            "reason": "evidence reference not found",
+                        }
+                    )
 
     checks = {
         "exact_expected_count": len(envelopes) == expected_count,
         "unique_organisation_numbers": (
-            len(organisation_numbers)
-            == len(set(organisation_numbers))
+            len(organisation_numbers) == len(set(organisation_numbers))
         ),
         "required_sections_present": not missing_sections,
         "legal_identity_matches_envelope": not identity_errors,

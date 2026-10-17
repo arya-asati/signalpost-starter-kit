@@ -69,8 +69,8 @@ def accounting_obligation_assessment(
     record = evidence(
         "accounting_obligation",
         "available",
-        "official_rule_interpretation",
-        ACCOUNTING_OBLIGATION_SOURCE,
+        "local_ruleset_interpretation",
+        "",
         value={
             "classification": classification,
             "legal_form": legal_form or None,
@@ -86,6 +86,7 @@ def accounting_obligation_assessment(
             "Locally applied ruleset. The linked guidance page was not "
             "fetched during this run. ruleset_sha256 hashes the local "
             "ruleset identifier, not the webpage contents."
+            f"Reference (not fetched): {ACCOUNTING_OBLIGATION_SOURCE}"
         ),
     )
 
