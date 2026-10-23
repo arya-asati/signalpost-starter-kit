@@ -231,8 +231,12 @@ def main() -> None:
 
         metric = {
             "requests": (
-                len(metrics) + website_metrics["requests"]
-            ),
+    sum(
+        int(getattr(item, "request_count", 1) or 0)
+        for item in metrics
+    )
+    + website_metrics["requests"]
+),
             "bytes": (
                 sum(item.bytes_received for item in metrics)
                 + website_metrics["bytes"]

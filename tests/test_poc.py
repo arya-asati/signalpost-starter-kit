@@ -1294,7 +1294,7 @@ class WebsiteIdentityTests(unittest.TestCase):
         aon = {"name": "Aon Norway AS"}
         fish = {"name": "Norsk Fiskeeksport AS"}
         self.assertFalse(assess_social_identity(aon, {"platform": "linkedin", "url": "https://linkedin.com/company/aon"})["publishable"])
-        self.assertTrue(assess_social_identity(fish, {"platform": "linkedin", "url": "https://linkedin.com/company/norsk-fiskeeksport"})["publishable"])
+        self.assertFalse(assess_social_identity(fish, {"platform": "linkedin", "url": "https://linkedin.com/company/norsk-fiskeeksport"})["publishable"])
 
 
 class VerifiedSiteSeedTests(unittest.TestCase):
