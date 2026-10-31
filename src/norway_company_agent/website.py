@@ -17,6 +17,9 @@ from bs4 import BeautifulSoup
 import extruct
 import tldextract
 import trafilatura
+# Use the bundled Public Suffix List.
+# This prevents tldextract from making hidden external HTTP requests.
+_TLD_EXTRACT = tldextract.TLDExtract(suffix_list_urls=())
 
 from .evidence import evidence
 
@@ -117,9 +120,8 @@ def normalize_homepage(value: str | None) -> str | None:
 
 def _registered_domain(url: str) -> str:
     parsed = urllib.parse.urlparse(url)
-    ext = tldextract.extract(parsed.hostname or "")
+    ext = _TLD_EXTRACT(parsed.hostname or "")
     return ext.top_domain_under_public_suffix
-
 
 def _robots_allowed(
     url: str,

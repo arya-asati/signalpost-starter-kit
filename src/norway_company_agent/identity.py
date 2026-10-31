@@ -74,6 +74,203 @@ def _normalised_text(value: Any) -> str:
     return " ".join(_tokens(value))
 
 
+# CARLIN_REGISTRY_OFFICER_IDENTITY_RULE
+
+def _identity_hostname(url: str | None) -> str:
+    """Normalize a URL hostname, including registry values without a scheme."""
+    raw = str(url or "").strip()
+    if not raw:
+        return ""
+
+    if "://" not in raw:
+        raw = "//" + raw
+
+    try:
+        host = (urllib.parse.urlparse(raw).hostname or "").casefold().rstrip(".")
+    except ValueError:
+        return ""
+
+    return host.removeprefix("www.")
+
+
+def _registry_listed_officer_ownership(
+    profile: dict[str, Any],
+    website_value: dict[str, Any],
+    final_url: str,
+    legal_name_tokens: list[str],
+) -> bool:
+    """
+    Verify a narrow first-party identity case.
+
+    Required:
+    1. The registry-listed homepage and fetched homepage have the same host.
+    2. Official roles contain an active managing director or board chair.
+    3. That officer's first and last names appear on the homepage.
+    4. The homepage explicitly connects the legal entity name to a
+       first-person ownership/operation statement.
+    """
+
+    if not legal_name_tokens:
+        return False
+
+    registered_url = profile.get("website")
+    if not registered_url:
+        registry_value = (
+            profile.get("evidence", {})
+            .get("registry", {})
+            .get("value", {})
+        )
+        if isinstance(registry_value, dict):
+            registered_url = (
+                registry_value.get("hjemmeside")
+                or registry_value.get("website")
+            )
+
+    registered_host = _identity_hostname(registered_url)
+    fetched_host = _identity_hostname(final_url)
+
+    if not registered_host or registered_host != fetched_host:
+        return False
+
+    requested_url = website_value.get("requested_url")
+    if requested_url:
+        if _identity_hostname(requested_url) != registered_host:
+            return False
+
+    homepage_parts = [
+        website_value.get("title"),
+        website_value.get("description"),
+        website_value.get("identity_text_excerpt"),
+        website_value.get("main_text_excerpt"),
+    ]
+
+    rendered = website_value.get("js_fallback") or {}
+    homepage_parts.extend([
+        rendered.get("title"),
+        rendered.get("main_text_excerpt"),
+    ])
+
+    homepage_text = " ".join(
+        str(part or "")
+        for part in homepage_parts
+        if str(part or "").strip()
+    )
+
+    homepage_tokens = set(_tokens(homepage_text))
+    if not homepage_tokens:
+        return False
+
+    # Verify an active, authoritative company officer.
+    roles_record = (
+        profile.get("evidence", {})
+        .get("roles", {})
+    )
+
+    if roles_record.get("status") != "available":
+        return False
+
+    roles_value = roles_record.get("value") or {}
+    role_rows = (
+        roles_value.get("roles", [])
+        if isinstance(roles_value, dict)
+        else []
+    )
+
+    eligible_role_labels = {
+        "daglig leder",
+        "styrets leder",
+        "styreleder",
+        "managing director",
+        "chief executive officer",
+        "chairman of the board",
+    }
+
+    officer_verified = False
+
+    for role in role_rows:
+        if not isinstance(role, dict):
+            continue
+
+        inactive_value = role.get("inactive")
+        inactive = (
+            inactive_value is True
+            or str(inactive_value).strip().casefold()
+            in {"true", "1", "yes"}
+        )
+
+        if inactive:
+            continue
+
+        role_label = _normalised_text(
+            role.get("role") or role.get("role_code")
+        )
+
+        if role_label not in eligible_role_labels:
+            continue
+
+        officer_tokens = _tokens(role.get("name"))
+
+        # Require at least a first name and surname.
+        # Middle names may legitimately be omitted from the website.
+        if len(officer_tokens) < 2:
+            continue
+
+        first_and_last = {
+            officer_tokens[0],
+            officer_tokens[-1],
+        }
+
+        if first_and_last.issubset(homepage_tokens):
+            officer_verified = True
+            break
+
+    if not officer_verified:
+        return False
+
+    # Require the company name and explicit first-person ownership
+    # language in the same captured homepage sentence.
+    ownership_phrases = (
+        "driver jeg mitt eget aksjeselskap",
+        "jeg driver mitt eget aksjeselskap",
+        "driver jeg mitt eget selskap",
+        "jeg driver mitt eget selskap",
+        "jeg eier selskapet",
+        "mitt eget aksjeselskap",
+        "i run my own company",
+        "run my own company",
+        "i own my company",
+        "own my own company",
+    )
+
+        # HTML extraction can insert newlines inside a sentence.
+    # Normalize line breaks before checking sentence-level identity evidence.
+    sentence_text = re.sub(r"[\r\n\t]+", " ", homepage_text)
+
+    sentences = re.split(
+        r"(?<=[.!?])\s+|;",
+        sentence_text,
+    )
+
+    for sentence in sentences:
+        normalized_sentence = _normalised_text(sentence)
+        sentence_tokens = set(_tokens(sentence))
+
+        company_name_present = set(legal_name_tokens).issubset(
+            sentence_tokens
+        )
+
+        ownership_statement_present = any(
+            phrase in normalized_sentence
+            for phrase in ownership_phrases
+        )
+
+        if company_name_present and ownership_statement_present:
+            return True
+
+    return False
+
+
+
 def _hostname(url: str | None) -> str:
     try:
         host = (urllib.parse.urlparse(str(url or "")).hostname or "").casefold().rstrip(".")
@@ -212,6 +409,13 @@ def assess_website_identity(profile: dict[str, Any]) -> dict[str, Any]:
         and (group_branded_homepage or (title_conflicts_with_legal_name and bool(identity_excerpt)))
     )
 
+    registry_listed_officer_identity = _registry_listed_officer_ownership(
+        profile,
+        value,
+        str(final_url),
+        core,
+    )
+
     if any(marker in normalized_raw for marker in parked_markers):
         score = 0.1
         reasons.append("captured page is a parked, for-sale, or generic hosting placeholder")
@@ -238,6 +442,12 @@ def assess_website_identity(profile: dict[str, Any]) -> dict[str, Any]:
     elif len(core) == 1 and exact_homepage_name and substantive_homepage:
         score = 0.92
         reasons.append("single distinctive legal-name token appears in homepage identity text with substantive content")
+    elif registry_listed_officer_identity:
+        score = 0.93
+        reasons.append(
+            "registry-listed domain, active company officer and explicit "
+            "first-person legal-entity statement are corroborated on homepage"
+        )
     elif ratio >= 0.75 and len(overlap) >= 2:
         score = 0.85
         reasons.append("most legal-name tokens appear, but exact identity is incomplete")
@@ -256,7 +466,7 @@ def assess_website_identity(profile: dict[str, Any]) -> dict[str, Any]:
         "legal_name_tokens": core,
         "matched_tokens": overlap,
         "reasons": reasons,
-        "method": "deterministic_name_org_evidence_v3",
+        "method": "deterministic_name_org_evidence_v4",
     }
 
 
