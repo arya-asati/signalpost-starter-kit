@@ -100,7 +100,7 @@ def main() -> None:
             digest = hashlib.sha256(json.dumps(matched, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()
             proof = [
                 {"type": "company_site_identity", "score": ((website.get("value") or {}).get("identity_assessment") or {}).get("score")},
-                {"type": "exact_normalized_youtube_channel_name", "value": core, "matched_search_results": len(matched)},
+                {"type": "exact_normalized_youtube_channel_name", "value": core, "legal_name": profile.get("name"), "matched_search_results": len(matched)},
             ]
             common = {
                 "organisation_number": org, "platform": "youtube", "retrieved_at": retrieved_at,

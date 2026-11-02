@@ -6,6 +6,7 @@ from typing import Any, Callable
 
 from .evidence import evidence
 from .http import FetchResult, fetch_json
+from .runtime_budget import BudgetExceeded, current_run_budget
 
 ACCOUNTING_OBLIGATION_SOURCE = "https://www.brreg.no/en/submission-of-annual-accounts/reporting-obligations-to-the-register-of-company-accounts/who-has-an-accounting-obligation/"
 ACCOUNTING_RULESET_VERSION = "brreg_accounting_obligation_rules_2024-08-09_v1"
@@ -141,14 +142,21 @@ def _reserve_history_slot(clock: Callable[[], float] = time.monotonic, sleeper: 
     with _history_lock:
         delay = 2.1 - (clock() - _history_last_request)
         if delay > 0:
-            sleeper(delay)
+            budget = current_run_budget()
+            if budget is None:
+                sleeper(delay)
+            else:
+                budget.sleep(delay)
         _history_last_request = clock()
 
 
-def _fetch_history(url: str) -> FetchResult:
+def _fetch_history(
+    url: str,
+    fetcher: Callable[[str], FetchResult] = fetch_json,
+) -> FetchResult:
     """Keep this endpoint below its observed 30-request-starts/minute allowance."""
     _reserve_history_slot()
-    return fetch_json(url)
+    return fetcher(url)
 
 
 def normalize_roles(body: Any) -> dict[str, Any]:
@@ -261,10 +269,28 @@ def fetch_official_modules(org: str, modules: set[str], fetcher: Callable[[str],
         "group": (BRREG_GROUP.format(org=org), "official_group_structure"),
         "locations": (BRREG_SUBUNITS.format(org=org), "official_subunits"),
     }
-    for module, (url, source_type) in endpoints.items():
-        if module not in modules:
-            continue
-        result = _fetch_history(url) if module == "financial_history" and fetcher is fetch_json else fetcher(url)
+    requested = [
+        (module, url, source_type)
+        for module, (url, source_type) in endpoints.items()
+        if module in modules
+    ]
+    for index, (module, url, source_type) in enumerate(requested):
+        try:
+            result = (
+                _fetch_history(url, fetcher)
+                if module == "financial_history"
+                else fetcher(url)
+            )
+        except BudgetExceeded as exc:
+            for remaining_module, _, _ in requested[index:]:
+                records[remaining_module] = evidence(
+                    remaining_module,
+                    "budget_exhausted",
+                    "agent_execution",
+                    "",
+                    note=str(exc),
+                )
+            break
         metrics.append(result)
         normalized = None
         if result.status == 200:

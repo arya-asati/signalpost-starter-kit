@@ -1,0 +1,85 @@
+Signalpost evaluation contract
+
+Status: scoring version 2, effective 26 August 2026 for every Round 1 entrant. Random daily evaluation began 24 August; all active submissions are rescored under version 2.
+
+In plain language
+
+Build a program that researches companies and keeps their profiles current. Test it locally on 100 companies; Builderr supplies the official company batch for scoring and gives the same current batch to every eligible frozen entry.
+
+We combine independently checked findings from all submissions and Builderr's own crawlers into one reference collection. New verified findings update the collection, and every entrant is rescored against the same version. This is the checked information we have found, not a claim that we found everything online.
+
+For each information type, 70% of its coverage score measures how many companies you covered and 30% measures how many individual facts you found. Example: the collection has 50 job postings across 20 companies. Finding 30 postings across 15 companies gives 60% of postings and 75% of companies: 70% × 75% + 30% × 60% = 70.5% for that information type. This feeds the 50 recall and coverage points; it is not the total score.
+
+The remaining points check precision and evidence (30), useful explanations (12) and ease of use (8). An entry qualifies with an official run and at least 65/100 overall. Coverage, recall and precision are scored dimensions, not separate qualification thresholds. Company-matching precision is separate from factual accuracy; fabricated financial values or a material wrong-company publication prevent the run from becoming official.
+
+The exact requirements follow.
+
+Corpus
+
+- Universe: Norway-registered entities with observed annual-account records.
+- Public universe: all 411,160 eligible organisation numbers.
+- Local scale test: 100 companies. Larger local tests, including 1,000 or more companies, are encouraged but their precomputed profiles are not submitted or scored.
+- Public product sample: 100 profiles at `/signalpost`.
+- Official evaluation: Builderr selects the current shared batch after each cutoff; every eligible frozen entry receives the same batch. The shared set may grow—for example, from 1,000 to 1,100 companies—and all active entries are run on the same expanded set.
+- Completed runs add to a cumulative, locked checked reference set used when scores are updated.
+- The public universe is available for local testing. Freshness, exact attribution and reproducible execution—not a submitted static profile file—are what the official run tests.
+- Every entrant receives the same batch, cutoff, network policy and resource budget. A timeout or missing result is not scored; a Builderr infrastructure failure is rerun.
+- Eligible-universe uncompressed content SHA-256: `b82d6a3e7231d1759a958c282bc4366b80ec2fab8095053d8ed7fa9cd01bc838`.
+- Public `.jsonl.gz` archive SHA-256: `1c89710e5b01f8617e86d09fbdff4a52f2f8dbbba297e74f7164b5984f5a0384`.
+
+Output contract
+
+Exactly one terminal envelope per input organisation number. Envelopes must contain legal identity, claims, evidence references, availability states, source snapshots, refresh metadata and errors. Valid states are `available`, `not_available`, `blocked`, `not_applicable`, `ambiguous` and `failed`.
+
+Scoring — 100
+
+1. Recall and coverage — 50
+2. Precision, exact identity and evidence — 30
+3. Decision-useful synthesis — 12
+4. UX and interaction — 8
+
+Recall and coverage control 50 points. For every external field family, coverage is 70% company recall and 30% individual-claim recall against the independently verified union of discoveries from every submitted crawler and Builderr’s own crawlers. The union is cumulative and versioned: each verified addition creates a new pool hash and every entrant is rescored against that same latest version. The final union freezes only after all eligible final submissions have been verified.
+
+Official-run checks
+
+- The submitted public artifact includes a 100-company smoke-test result or report.
+- Every official input produces exactly one terminal envelope per company.
+- No fabricated financial value or material wrong-company publication.
+- Published material claims have source, retrieval time and reporting period where relevant.
+- Missing values are never silently converted to zero.
+- Re-running the same snapshot is idempotent.
+- Refresh preserves prior evidence and exposes material changes.
+- Setup is reproducible with pinned dependencies and one evaluator command.
+- Source rights, secrets and outbound URL policy are documented and safe.
+
+Qualification is an official run with 65/100 or more. Official-run checks establish whether the run is valid; they do not create additional score bars. Final ranking uses the mean across every scheduled daily batch while an entrant has an active frozen version. An entrant-caused failed or missed batch scores zero after Builderr reproduces the failure in a clean evaluator run. A batch affected by Builderr’s harness, infrastructure or a shared-source failure is void and rerun for every affected entry with the same frozen code. Ties break on fewer wrong-company publications, then higher weighted company recall, then lower declared third-party cost.
+
+Official run requirements
+
+- The current official input batch, supplied by Builderr (1,000 companies now; it may grow to 1,100)
+- A fixed time and resource budget supplied equally to every entrant
+- Exactly one terminal envelope for every input company
+- A timeout or missing result is not scored. A Builderr infrastructure failure is rerun for every affected entry.
+- server-side secrets supplied through documented environment variables only
+
+Builderr provides the frozen official registry snapshot used for identity anchoring. External caches must be declared. Cached public-universe material is allowed, but the official score still enforces source timestamps, refresh behavior and the same evidence cutoff for everyone.
+
+The first submission is version 1. Entrants may then submit up to four revised exact commit hashes through 7 November 2026, for five versions total. Revisions take effect only after being frozen for the next daily run, and never replace earlier batch results.
+
+If the verified pool has fewer than 15 positive company-field opportunities across at least three external field families, recall is reported as not measured for that batch rather than as 0%. It remains a scored observation, not a qualification gate.
+
+Measurement
+
+Report exact-company precision, wrong-company publications, per-field precision/recall/coverage, evidence-span validity, crawl completion, refresh correctness, false-change rate, cost per company, request count, p50/p95 runtime.
+
+Public voting
+
+Only qualified entries enter the hosted Builderr gallery. A $100 public-vote award runs every fortnight. Votes never alter the final technical score or ranking.
+
+Local checks
+
+```bash
+npm run check:signalpost
+npm run check:signalpost-showcase
+npm run check:signalpost-challenge
+```

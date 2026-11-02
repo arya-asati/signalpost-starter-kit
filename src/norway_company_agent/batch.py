@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any, Iterable
 
 from .evidence import evidence, utc_now
-from .official import accounting_obligation_assessment
+from .official import ACCOUNTING_OBLIGATION_SOURCE, accounting_obligation_assessment
 from .sampling import iter_bulk
 
 
@@ -22,6 +23,27 @@ TERMINAL_STATES = {
 }
 
 
+ORG_NUMBER_WEIGHTS = (3, 2, 7, 6, 5, 4, 3, 2)
+
+
+def normalize_organisation_number(value: Any) -> str:
+    """Normalize and validate a Norwegian nine-digit organisation number."""
+    raw = str(value or "").strip()
+    org = re.sub(r"[\s-]", "", raw)
+    if not re.fullmatch(r"[0-9]{9}", org):
+        raise ValueError(f"Invalid Norwegian organisation number: {value!r}")
+    weighted_sum = sum(
+        int(digit) * weight
+        for digit, weight in zip(org[:8], ORG_NUMBER_WEIGHTS)
+    )
+    check_digit = 11 - (weighted_sum % 11)
+    if check_digit == 11:
+        check_digit = 0
+    if check_digit == 10 or check_digit != int(org[-1]):
+        raise ValueError(f"Invalid Norwegian organisation number checksum: {value!r}")
+    return org
+
+
 def read_organisation_inputs(path: str | Path) -> list[dict[str, Any]]:
     source = Path(path)
     text = source.read_text(encoding="utf-8")
@@ -35,10 +57,8 @@ def read_organisation_inputs(path: str | Path) -> list[dict[str, Any]]:
         values = [line.strip() for line in text.splitlines() if line.strip()]
     records = []
     for value in values:
-        org = value.get("organisation_number") if isinstance(value, dict) else value
-        org = "".join(character for character in str(org or "") if character.isdigit())
-        if len(org) != 9:
-            raise ValueError(f"Invalid Norwegian organisation number: {value!r}")
+        org_value = value.get("organisation_number") if isinstance(value, dict) else value
+        org = normalize_organisation_number(org_value)
         record = {"organisation_number": org}
         if isinstance(value, dict):
             for key in ("evaluation_split", "sample_slice"):
@@ -58,7 +78,11 @@ def read_organisation_numbers(path: str | Path) -> list[str]:
 def profiles_from_bulk(path: str | Path, organisation_numbers: Iterable[str]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     requested = list(organisation_numbers)
     wanted = set(requested)
-    snapshot_sha256 = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    snapshot_hasher = hashlib.sha256()
+    with Path(path).open("rb") as snapshot_file:
+        for chunk in iter(lambda: snapshot_file.read(1024 * 1024), b""):
+            snapshot_hasher.update(chunk)
+    snapshot_sha256 = snapshot_hasher.hexdigest()
     retrieved_at = utc_now()
     found: dict[str, dict[str, Any]] = {}
     scanned = 0
@@ -72,37 +96,73 @@ def profiles_from_bulk(path: str | Path, organisation_numbers: Iterable[str]) ->
     "__signalpost_source_row_text__",
     None,
 )
+        registry_record = {
+            **evidence(
+                "registry",
+                "available",
+                "official_registry_bulk",
+                "https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv",
+                value=raw,
+                retrieved_at=retrieved_at,
+                content_sha256=snapshot_sha256,
+                source_row_key=org,
+            ),
+            **(
+                {"claim_span": source_row_text}
+                if source_row_text
+                else {}
+            ),
+        }
+        accounting_record = accounting_obligation_assessment(profile)
+        # This is a local interpretation of the exact registry row. Keep the
+        # registry source URL/hash alongside the separate ruleset hash so the
+        # resulting claims retain both data and logic provenance.
+        accounting_record.update({
+            "source_url": registry_record["source_url"],
+            "retrieved_at": registry_record["retrieved_at"],
+            "content_sha256": registry_record["content_sha256"],
+            "source_row_key": org,
+            "reference_url": ACCOUNTING_OBLIGATION_SOURCE,
+        })
         profile["evidence"] = {
-            "registry": {
-    **evidence(
-        "registry",
-        "available",
-        "official_registry_bulk",
-        "https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv",
-        value=raw,
-        retrieved_at=retrieved_at,
-        content_sha256=snapshot_sha256,
-        source_row_key=org,
-    ),
-    **(
-        {"claim_span": source_row_text}
-        if source_row_text
-        else {}
-    ),
-},
-            "accounting_obligation": accounting_obligation_assessment(profile),
+            "registry": registry_record,
+            "accounting_obligation": accounting_record,
         }
         found[org] = profile
         if len(found) == len(wanted):
             break
     missing = [org for org in requested if org not in found]
-    if missing:
-        raise ValueError(f"Organisation numbers absent from registry snapshot: {missing[:10]}")
+    for org in missing:
+        found[org] = {
+            "organisation_number": org,
+            "name": None,
+            "evidence": {
+                "registry": evidence(
+                    "registry",
+                    "source_error",
+                    "agent_execution",
+                    "",
+                    value=None,
+                    retrieved_at=retrieved_at,
+                    note=(
+                        "Organisation number is absent from the supplied "
+                        "frozen registry snapshot; no live fallback is "
+                        "configured for this run."
+                    ),
+                ),
+            },
+            "errors": [{
+                "kind": "registry_snapshot_missing",
+                "message": "No profile was found in the supplied registry snapshot.",
+            }],
+        }
     return [found[org] for org in requested], {
         "registry_snapshot_sha256": snapshot_sha256,
         "registry_rows_scanned": scanned,
         "requested": len(requested),
-        "selected": len(found),
+        "selected": len(found) - len(missing),
+        "snapshot_missing": len(missing),
+        "missing_organisation_numbers": missing,
     }
 
 
@@ -121,6 +181,8 @@ def evidence_terminal_state(record: dict[str, Any] | None) -> str:
         return "blocked_robots" if "robot" in note else "blocked_policy"
     if status == "source_error":
         return "source_error"
+    if status == "budget_exhausted":
+        return "budget_exhausted"
     return "submission_error"
 
 
@@ -152,8 +214,17 @@ def terminal_envelope(
     }
 
 
-def validate_envelopes(envelopes: list[dict[str, Any]], expected_count: int) -> dict[str, Any]:
+def validate_envelopes(
+    envelopes: list[dict[str, Any]],
+    expected_count: int,
+    expected_organisation_numbers: Iterable[str] | None = None,
+) -> dict[str, Any]:
     orgs = [item.get("organisation_number") for item in envelopes]
+    expected_orgs = (
+        list(expected_organisation_numbers)
+        if expected_organisation_numbers is not None
+        else None
+    )
     invalid_states = [
         {"organisation_number": item.get("organisation_number"), "state": state.get("state")}
         for item in envelopes
@@ -163,9 +234,16 @@ def validate_envelopes(envelopes: list[dict[str, Any]], expected_count: int) -> 
     checks = {
         "exact_expected_count": len(envelopes) == expected_count,
         "unique_organisation_numbers": len(orgs) == len(set(orgs)),
+        "input_membership_and_order_match": (
+            expected_orgs is None or orgs == expected_orgs
+        ),
         "all_entity_states_terminal": all(item.get("state") in TERMINAL_STATES for item in envelopes),
         "all_module_states_terminal": not invalid_states,
-        "zero_silent_drops": len(envelopes) == expected_count and len(orgs) == len(set(orgs)),
+        "zero_silent_drops": (
+            len(envelopes) == expected_count
+            and len(orgs) == len(set(orgs))
+            and (expected_orgs is None or orgs == expected_orgs)
+        ),
     }
     return {"passed": all(checks.values()), "checks": checks, "invalid_states": invalid_states}
 

@@ -167,6 +167,7 @@ def normalize_company(profile: dict, candidates: list[dict], retrieved_at: str) 
     source_url = str(candidate.get("link") or "")
     proof = [
         {"type": "maps_title_name_score", "value": assessment["name_score"]},
+        {"type": "fuzzy_name_score", "value": assessment["fuzzy_name_score"]},
         {"type": "registry_address_match", "value": assessment["address_match"]},
         {"type": "registry_postcode_city_match", "value": assessment["postcode_city_match"]},
         {"type": "registry_phone_match", "value": assessment["phone_match"]},

@@ -9,13 +9,16 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from .runtime_budget import BudgetExceeded, current_run_budget
+
 
 class _CountingRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Counts redirect requests in addition to each original open attempt."""
 
-    def __init__(self) -> None:
+    def __init__(self, budget: Any = None) -> None:
         super().__init__()
         self.redirect_count = 0
+        self.budget = budget
 
     def redirect_request(
         self,
@@ -26,6 +29,8 @@ class _CountingRedirectHandler(urllib.request.HTTPRedirectHandler):
         headers: Any,
         newurl: str,
     ) -> Any:
+        if self.budget is not None:
+            self.budget.before_request()
         self.redirect_count += 1
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
@@ -72,7 +77,8 @@ def fetch_json(
 
     last_error = "request failed"
     attempts_made = 0
-    redirect_handler = _CountingRedirectHandler()
+    budget = current_run_budget()
+    redirect_handler = _CountingRedirectHandler(budget)
     opener = urllib.request.build_opener(redirect_handler)
 
     for attempt in range(attempts):
@@ -84,11 +90,22 @@ def fetch_json(
                 "User-Agent": "builderr-signalpost-poc/0.1 (+https://builderr.ai)",
             },
         )
+        if budget is not None:
+            budget.before_request()
         attempts_made += 1
 
         try:
-            with opener.open(request, timeout=timeout) as response:
-                raw = response.read()
+            effective_timeout = (
+                budget.request_timeout(timeout)
+                if budget is not None
+                else timeout
+            )
+            with opener.open(request, timeout=effective_timeout) as response:
+                raw = (
+                    budget.read_response(response)
+                    if budget is not None
+                    else response.read()
+                )
                 elapsed = int((time.monotonic() - started) * 1000)
                 raw_text = _decode_raw(raw, response.headers)
                 body = json.loads(raw)
@@ -106,7 +123,11 @@ def fetch_json(
 
         except urllib.error.HTTPError as exc:
             elapsed = int((time.monotonic() - started) * 1000)
-            raw = exc.read()
+            raw = (
+                budget.read_response(exc)
+                if budget is not None
+                else exc.read()
+            )
 
             # Not-found responses are terminal and should not be retried.
             if exc.code in {404, 410}:
@@ -124,6 +145,9 @@ def fetch_json(
 
             last_error = f"HTTP {exc.code}"
 
+        except BudgetExceeded:
+            raise
+
         except (
             urllib.error.URLError,
             TimeoutError,
@@ -132,7 +156,11 @@ def fetch_json(
             last_error = type(exc).__name__
 
         if attempt + 1 < attempts:
-            time.sleep(0.4 * (2**attempt))
+            delay = 0.4 * (2**attempt)
+            if budget is not None:
+                budget.sleep(delay)
+            else:
+                time.sleep(delay)
 
     return FetchResult(
         url=url,

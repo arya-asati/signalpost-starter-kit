@@ -1,0 +1,157 @@
+{
+  "run_id": "offline-smoke-phase4a-final-release-v5-20261102",
+  "started_at": "2026-11-02T10:40:55.793153Z",
+  "completed_at": "2026-11-02T10:41:14.854869Z",
+  "official_mode": false,
+  "budget_sources": {
+    "max_requests": "unset",
+    "max_bytes": "unset",
+    "max_runtime_seconds": "unset"
+  },
+  "expected_count": 100,
+  "emitted_envelopes": 100,
+  "resumed_profiles": 0,
+  "profiles_fetched_this_run": 100,
+  "modules": [
+    "registry",
+    "accounting_obligation",
+    "registry_live",
+    "financials",
+    "roles",
+    "group",
+    "locations",
+    "website"
+  ],
+  "registry": {
+    "registry_snapshot_sha256": "3183a281f41cd9859f93a6955b417808dc949c658c036d1c6128fde83bea104e",
+    "registry_rows_scanned": 1174176,
+    "requested": 100,
+    "selected": 100,
+    "snapshot_missing": 0,
+    "missing_organisation_numbers": []
+  },
+  "operations": {
+    "requests": 0,
+    "bytes": 0,
+    "worker_failures": 0,
+    "request_metrics_complete": true,
+    "bytes_metrics_complete": true,
+    "latency_metrics_complete": true,
+    "p50_ms": null,
+    "p95_ms": null,
+    "peak_rss_bytes": 126484480
+  },
+  "resource_budget": {
+    "limits": {
+      "requests": null,
+      "bytes": null,
+      "runtime_seconds": null
+    },
+    "requests": 0,
+    "bytes_received": 0,
+    "elapsed_seconds": 19.062,
+    "exhausted_by": null
+  },
+  "execution_within_runtime_budget": true,
+  "refresh": {
+    "checked": true,
+    "previous_snapshot_available": true,
+    "material_change_count": 0,
+    "idempotent": true
+  },
+  "validation": {
+    "passed": true,
+    "checks": {
+      "internal_exact_expected_count": true,
+      "internal_unique_organisation_numbers": true,
+      "internal_input_membership_and_order_match": true,
+      "internal_all_entity_states_terminal": true,
+      "internal_all_module_states_terminal": true,
+      "internal_zero_silent_drops": true,
+      "contract_exact_expected_count": true,
+      "contract_unique_organisation_numbers": true,
+      "contract_required_sections_present": true,
+      "contract_legal_identity_matches_envelope": true,
+      "contract_all_claim_states_allowed": true,
+      "contract_all_claim_evidence_references_resolve": true,
+      "contract_available_claims_have_valid_provenance": true,
+      "contract_historical_evidence_is_not_used_for_current_claims": true,
+      "contract_refresh_metadata_is_valid": true
+    },
+    "internal_validation": {
+      "passed": true,
+      "checks": {
+        "exact_expected_count": true,
+        "unique_organisation_numbers": true,
+        "input_membership_and_order_match": true,
+        "all_entity_states_terminal": true,
+        "all_module_states_terminal": true,
+        "zero_silent_drops": true
+      },
+      "invalid_states": []
+    },
+    "contract_validation": {
+      "passed": true,
+      "checks": {
+        "exact_expected_count": true,
+        "unique_organisation_numbers": true,
+        "required_sections_present": true,
+        "legal_identity_matches_envelope": true,
+        "all_claim_states_allowed": true,
+        "all_claim_evidence_references_resolve": true,
+        "available_claims_have_valid_provenance": true,
+        "historical_evidence_is_not_used_for_current_claims": true,
+        "refresh_metadata_is_valid": true
+      },
+      "invalid_states": [],
+      "dangling_evidence_refs": [],
+      "missing_sections": [],
+      "identity_errors": [],
+      "provenance_errors": [],
+      "historical_reference_errors": [],
+      "refresh_errors": []
+    }
+  },
+  "execution_mode": "offline_saved_local_profile_replay",
+  "live_research_requests": 0,
+  "saved_profile_cache": "/Users/aryaasati/Documents/signalpost-work/signalpost-starter-kit/out/smoke-profiles-offline-phase4a-final-release-v4-20261102.jsonl",
+  "saved_profile_cache_sha256": "8db2fb6f7a204857d91f2839ad2aa18691067f8d46530935735d425fa1b62e17",
+  "frozen_registry_snapshot_sha256": "3183a281f41cd9859f93a6955b417808dc949c658c036d1c6128fde83bea104e",
+  "working_tree_fingerprint_sha256": "06d371c2ae57a787d6074396cebfb6979cf5b5eac978455d525e871929a65089",
+  "git_commit": "dbd2c1bfee0a65d4148620d25aeb93d614007e69",
+  "evidence_freshness_note": "Evidence is replayed from the saved local profile cache; no current external research was performed.",
+  "smoke_validation": {
+    "passed": true,
+    "checks": {
+      "offline_mode_declared": true,
+      "no_live_research_requests": true,
+      "report_expected_100": true,
+      "report_emitted_100": true,
+      "report_structural_validation_passed": true,
+      "actual_envelope_count_100": true,
+      "actual_envelopes_valid": true,
+      "code_fingerprint_present": true
+    },
+    "contract_validation": {
+      "passed": true,
+      "checks": {
+        "exact_expected_count": true,
+        "unique_organisation_numbers": true,
+        "required_sections_present": true,
+        "legal_identity_matches_envelope": true,
+        "all_claim_states_allowed": true,
+        "all_claim_evidence_references_resolve": true,
+        "available_claims_have_valid_provenance": true,
+        "historical_evidence_is_not_used_for_current_claims": true,
+        "refresh_metadata_is_valid": true
+      },
+      "invalid_states": [],
+      "dangling_evidence_refs": [],
+      "missing_sections": [],
+      "identity_errors": [],
+      "provenance_errors": [],
+      "historical_reference_errors": [],
+      "refresh_errors": []
+    }
+  }
+}

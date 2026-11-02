@@ -93,7 +93,10 @@ class ExternalFootprintTests(unittest.TestCase):
             "retrieved_at": "2026-08-20T00:00:00Z",
             "content_sha256": "a" * 64,
             "exact_entity": True,
-            "identity_proof": [{"type": "address_match", "value": "Oslo"}],
+            "identity_proof": [
+                {"type": "maps_title_name_score", "value": 1.0},
+                {"type": "registry_address_match", "value": True},
+            ],
             "acquisition_mode": "official_api",
             "rights_status": "approved",
             "source_class": "customer_review",
@@ -293,7 +296,15 @@ class ExternalFootprintTests(unittest.TestCase):
     def test_aggregate_keeps_source_metrics_separate_and_abstains_on_thin_sentiment(self):
         items = [
             self.observation(id="a", sentiment_label="positive", sentiment_model_version="m1"),
-            self.observation(id="b", platform="youtube", signal_type="profile_metrics", source_url="https://youtube.com/@example", evidence_span=None),
+            self.observation(
+                id="b", platform="youtube", signal_type="profile_metrics",
+                source_url="https://youtube.com/@example", evidence_span=None,
+                source_class="company_social",
+                identity_proof=[
+                    {"type": "company_site_identity", "score": 0.95},
+                    {"type": "exact_normalized_youtube_channel_name", "value": "example", "legal_name": "Example AS"},
+                ],
+            ),
         ]
         result = aggregate_footprint(items, as_of="2026-08-22T00:00:00Z")
         self.assertEqual(result["accepted_observations"], 2)
@@ -453,7 +464,14 @@ class ExternalFootprintTests(unittest.TestCase):
             "name": "Example AS",
             "evidence": {"website": {"value": {"identity_assessment": {"publishable": True}}}},
         }
-        handle = self.observation(signal_type="profile_handle", source_class="company_social", evidence_span=None, strategy="verified_handle_extraction")
+        handle = self.observation(
+            platform="youtube", signal_type="profile_handle", source_url="https://youtube.com/@example",
+            source_class="company_social", evidence_span=None, strategy="verified_handle_extraction",
+            identity_proof=[
+                {"type": "company_site_identity", "score": 0.95},
+                {"type": "exact_normalized_youtube_channel_name", "value": "example", "legal_name": "Example AS"},
+            ],
+        )
         score = development_score(profile, [handle])
         self.assertGreater(score["score"], 0)
         self.assertEqual(score["sentiment_status"], "abstain")
@@ -469,8 +487,24 @@ class ExternalFootprintTests(unittest.TestCase):
             "evidence": {"website": {"value": {"identity_assessment": {"publishable": True}}}},
         }
         observations = [
-            self.observation(signal_type="profile_handle", source_class="company_social", evidence_span=None, strategy="verified_handle_extraction"),
-            self.observation(id="metric", platform="youtube", signal_type="profile_metrics", source_url="https://youtube.com/@example", evidence_span=None, strategy="social_profile_metrics"),
+            self.observation(
+                platform="youtube", signal_type="profile_handle", source_url="https://youtube.com/@example",
+                source_class="company_social", evidence_span=None, strategy="verified_handle_extraction",
+                identity_proof=[
+                    {"type": "company_site_identity", "score": 0.95},
+                    {"type": "exact_normalized_youtube_channel_name", "value": "example", "legal_name": "Example AS"},
+                ],
+            ),
+            self.observation(
+                id="metric", platform="youtube", signal_type="profile_metrics",
+                source_url="https://youtube.com/@example", evidence_span=None,
+                source_class="company_social",
+                identity_proof=[
+                    {"type": "company_site_identity", "score": 0.95},
+                    {"type": "exact_normalized_youtube_channel_name", "value": "example", "legal_name": "Example AS"},
+                ],
+                strategy="social_profile_metrics",
+            ),
         ]
         result = run_company_control(profile, observations, target=20, minimum_iterations=1)
         self.assertEqual(result["iterations_run"], len(strategy_order([])))
@@ -488,6 +522,7 @@ class ExternalFootprintTests(unittest.TestCase):
             source_url="https://www.wikidata.org/wiki/Q123",
             evidence_span="Q123: P2333=923609016",
             source_class="open_knowledge_graph",
+            identity_proof=[{"type": "wikidata_organisation_number_match", "value": "923609016"}],
             strategy="company_site_identity",
         )
         score = development_score(profile, [wikidata])
@@ -576,8 +611,8 @@ class CompletenessScoreTests(unittest.TestCase):
             "evidence": {"website": {
                 "status": "available", "retrieved_at": "2026-08-23T00:00:00Z",
                 "value": {
-                    "identity_assessment": {"publishable": True, "score": 1.0},
-                    "pages": [{"url": "https://example.test/aktuelt/new-contract", "title": "New contract", "content_sha256": "a" * 64}],
+                    "identity_assessment": {"publishable": True, "status": "exact", "score": 1.0},
+                    "pages": [{"url": "https://example.test/aktuelt/new-contract", "title": "New contract", "main_text_excerpt": "The company announced a new contract.", "published_at": "2026-08-21T00:00:00Z", "publication_date_source": "test_fixture", "content_sha256": "a" * 64}],
                 },
             }},
         }
@@ -1225,6 +1260,31 @@ class RefreshTests(unittest.TestCase):
         self.assertIsNone(change["old_value"])
         self.assertEqual(change["new_value"], 0)
         self.assertEqual(change["source_url"], "https://example.test/entity")
+
+    def test_refresh_tracker_redacts_website_text_and_social_links(self):
+        old = {
+            "organisation_number": "923609016",
+            "evidence": {"website": {"status": "review", "value": {
+                "description": "Old private contact person@example.test",
+                "social_links": [{"platform": "facebook", "url": "https://facebook.com/private"}],
+            }}},
+        }
+        new = {
+            "organisation_number": "923609016",
+            "evidence": {"website": {"status": "blocked", "value": {
+                "description": "New private contact person@example.test",
+                "social_links": [{"platform": "instagram", "url": "https://instagram.com/private"}],
+            }}},
+        }
+        changes = diff_profile(old, new)
+        self.assertEqual(len(changes), 3)
+        self.assertIn(
+            "evidence.website",
+            {change["field"] for change in changes},
+        )
+        self.assertTrue(all(change["old_value"]["redacted"] and change["new_value"]["redacted"] for change in changes))
+        self.assertNotIn("person@example.test", json.dumps(changes))
+        self.assertNotIn("facebook.com/private", json.dumps(changes))
 
     def test_refresh_rejects_membership_or_identity_drift(self):
         with self.assertRaises(ValueError):

@@ -11,6 +11,7 @@ import urllib.parse
 import urllib.request
 import urllib.robotparser
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from bs4 import BeautifulSoup
@@ -19,9 +20,10 @@ import tldextract
 import trafilatura
 # Use the bundled Public Suffix List.
 # This prevents tldextract from making hidden external HTTP requests.
-_TLD_EXTRACT = tldextract.TLDExtract(suffix_list_urls=())
+_TLD_EXTRACT = tldextract.TLDExtract(cache_dir=None, suffix_list_urls=())
 
 from .evidence import evidence
+from .runtime_budget import BudgetExceeded, current_run_budget
 
 USER_AGENT = "builderr-signalpost-poc/0.1 (+https://builderr.ai)"
 SOCIAL_HOSTS = {
@@ -35,9 +37,16 @@ SOCIAL_HOSTS = {
     "tiktok.com": "tiktok",
 }
 PRIORITY_TERMS = (
+    # Hiring paths are deliberately prioritised so the bounded crawl can find
+    # company-owned recruitment pages before spending its four-page budget.
+    "karriere", "career", "careers", "jobb", "jobs", "stillinger",
+    "ledige-stillinger", "ledig-stilling", "jobbmuligheter", "open-positions",
+    "vacancies", "vacancy", "join-us", "work-with-us", "arbeid-hos-oss",
+    "bli-med", "recruit", "recruitment",
+    "news", "newsroom", "press", "press-releases", "presse", "media",
+    "aktuelt", "nyheter", "oppdateringer", "updates", "innsikt", "insights", "publikasjoner",
     "om-oss", "om_oss", "about", "kontakt", "contact", "ledelse", "management",
     "team", "people", "locations", "lokasjoner", "avdelinger", "butikker",
-    "news", "press", "aktuelt", "nyheter",
 )
 
 
@@ -74,6 +83,9 @@ class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
         newurl: str,
     ) -> Any:
         assert_public_url(newurl)
+        budget = current_run_budget()
+        if budget is not None:
+            budget.before_request()
         request_counter = getattr(_REQUEST_COUNTER_LOCAL, "counter", None)
         if request_counter is not None:
             request_counter[0] += 1
@@ -91,6 +103,10 @@ def _open_counted(
 ) -> Any:
     """Open one URL and count its attempt plus every redirect in this thread."""
     request_counter[0] += 1
+    budget = current_run_budget()
+    if budget is not None:
+        budget.before_request()
+        timeout = budget.request_timeout(timeout)
     previous_counter = getattr(_REQUEST_COUNTER_LOCAL, "counter", None)
     _REQUEST_COUNTER_LOCAL.counter = request_counter
     try:
@@ -146,10 +162,12 @@ def _robots_allowed(
             timeout=timeout,
             request_counter=counter,
         ) as response:
-            parser.parse(
-                response.read().decode("utf-8", errors="replace").splitlines()
-            )
+            budget = current_run_budget()
+            raw = budget.read_response(response) if budget is not None else response.read()
+            parser.parse(raw.decode("utf-8", errors="replace").splitlines())
         return parser.can_fetch(USER_AGENT, url)
+    except BudgetExceeded:
+        raise
     except Exception:
         # Preserve prior POC behavior for absent or unreachable robots.txt.
         # The attempted robots request and its redirects remain counted.
@@ -243,7 +261,7 @@ def normalize_social_url(url: str) -> dict[str, str] | None:
     return {"platform": platform, "url": f"https://{canonical_host}/{'/'.join(parts)}"}
 
 
-def _priority_links(base_url: str, soup: BeautifulSoup, limit: int = 4) -> list[str]:
+def _priority_links(base_url: str, soup: BeautifulSoup, limit: int = 6) -> list[str]:
     base = urllib.parse.urlparse(base_url)
     candidates: dict[str, int] = {}
     for anchor in soup.select("a[href]"):
@@ -298,7 +316,12 @@ def _fetch_secondary_page(
             timeout=timeout,
             request_counter=counter,
         ) as response:
-            raw = response.read(max_bytes + 1)
+            budget = current_run_budget()
+            raw = (
+                budget.read_response(response, local_max_bytes=max_bytes)
+                if budget is not None
+                else response.read(max_bytes + 1)
+            )
             elapsed = int((time.monotonic() - started) * 1000)
             final_url = response.geturl()
             if (
@@ -338,6 +361,7 @@ def _fetch_secondary_page(
             if page_soup.title
             else "",
             "main_text_excerpt": page_text[:5000],
+            **_publication_metadata(page_soup),
             "content_sha256": __import__("hashlib").sha256(raw).hexdigest(),
         }
         return (
@@ -348,6 +372,8 @@ def _fetch_secondary_page(
             elapsed,
             None,
         )
+    except BudgetExceeded:
+        raise
     except Exception as exc:
         return (
             None,
@@ -357,6 +383,103 @@ def _fetch_secondary_page(
             int((time.monotonic() - started) * 1000),
             f"{type(exc).__name__}: {str(exc)[:120]}",
         )
+
+
+
+
+def _normalise_page_date(value: Any) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    parsed = None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        for fmt in ("%d.%m.%Y", "%d/%m/%Y", "%Y/%m/%d"):
+            try:
+                parsed = datetime.strptime(raw, fmt)
+                break
+            except ValueError:
+                continue
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _publication_metadata(soup: BeautifulSoup) -> dict[str, str]:
+    """Capture an explicit article publication date separately from modified time."""
+    published_candidates = (
+        ('meta[property="article:published_time"]', "content"),
+        ('meta[property="og:article:published_time"]', "content"),
+        ('meta[name="datePublished"]', "content"),
+        ('meta[name="publish-date"]', "content"),
+        ('meta[name="pubdate"]', "content"),
+        ('meta[name="DC.date.issued"]', "content"),
+        ('time[itemprop="datePublished"][datetime]', "datetime"),
+        ('[itemprop="datePublished"][content]', "content"),
+    )
+    modified_candidates = (
+        ('meta[property="article:modified_time"]', "content"),
+        ('meta[property="og:updated_time"]', "content"),
+        ('meta[name="last-modified"]', "content"),
+        ('time[itemprop="dateModified"][datetime]', "datetime"),
+    )
+
+    result: dict[str, str] = {}
+    for selector, attribute in published_candidates:
+        node = soup.select_one(selector)
+        if node:
+            value = _normalise_page_date(node.get(attribute))
+            if value:
+                result["published_at"] = value
+                result["publication_date_source"] = f"html:{selector}"
+                break
+    for selector, attribute in modified_candidates:
+        node = soup.select_one(selector)
+        if node:
+            value = _normalise_page_date(node.get(attribute))
+            if value:
+                result["date_modified"] = value
+                result["modified_date_source"] = f"html:{selector}"
+                break
+
+    def walk_jsonld(node: Any):
+        if isinstance(node, dict):
+            yield node
+            for child in node.values():
+                yield from walk_jsonld(child)
+        elif isinstance(node, list):
+            for child in node:
+                yield from walk_jsonld(child)
+
+    for script in soup.select('script[type="application/ld+json"]'):
+        try:
+            import json as _json
+            data = _json.loads(script.string or script.get_text())
+        except (TypeError, ValueError):
+            continue
+        for node in walk_jsonld(data):
+            kind = node.get("@type")
+            raw_kinds = kind if isinstance(kind, list) else [kind]
+            kinds = {str(item).rsplit("/", 1)[-1] for item in raw_kinds if item}
+            article_types = {"Article", "NewsArticle", "BlogPosting", "Report", "PressRelease", "TechArticle"}
+            if not kinds.intersection(article_types):
+                continue
+            if "published_at" not in result:
+                value = _normalise_page_date(node.get("datePublished"))
+                if value:
+                    result["published_at"] = value
+                    result["publication_date_source"] = "jsonld:" + ",".join(sorted(str(item) for item in kinds if item))
+            if "date_modified" not in result:
+                value = _normalise_page_date(node.get("dateModified"))
+                if value:
+                    result["date_modified"] = value
+                    result["modified_date_source"] = "jsonld:" + ",".join(sorted(str(item) for item in kinds if item))
+            if "published_at" in result and "date_modified" in result:
+                break
+    return result
 
 
 def _jsonld_organisations(metadata: dict[str, Any]) -> list[dict[str, Any]]:
@@ -448,7 +571,12 @@ def fetch_website(
             request_counter=request_counter,
         ) as response:
             content_type = response.headers.get("content-type", "")
-            raw = response.read(max_bytes + 1)
+            budget = current_run_budget()
+            raw = (
+                budget.read_response(response, local_max_bytes=max_bytes)
+                if budget is not None
+                else response.read(max_bytes + 1)
+            )
             elapsed = int((time.monotonic() - started) * 1000)
 
             if len(raw) > max_bytes:
@@ -531,6 +659,7 @@ def fetch_website(
                 "url": final_url,
                 "title": title[:500],
                 "main_text_excerpt": text[:5000],
+                **_publication_metadata(soup),
                 "content_sha256": content_hash,
             }
         ]
@@ -601,6 +730,9 @@ def fetch_website(
             "bytes": bytes_received,
             "latencies_ms": page_latencies,
         }
+
+    except BudgetExceeded:
+        raise
 
     except urllib.error.HTTPError as exc:
         elapsed = int((time.monotonic() - started) * 1000)

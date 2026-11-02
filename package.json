@@ -1,0 +1,9 @@
+{
+  "name": "signalpost-starter-kit-checks",
+  "private": true,
+  "scripts": {
+    "check:signalpost": "uv run --frozen python -m compileall -q src scripts && uv run --frozen python -m pytest -q",
+    "check:signalpost-showcase": "uv run --frozen python scripts/offline_smoke.py --validate-only --report out/smoke-report-offline-phase4a-final-release-v5-20261102.json --envelopes out/smoke-envelopes-offline-phase4a-final-release-v5-20261102.jsonl",
+    "check:signalpost-challenge": "uv run --frozen python -m pytest -q tests/test_batch_reliability.py tests/test_output_contract.py tests/test_refresh_contract.py"
+  }
+}

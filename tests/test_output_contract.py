@@ -90,7 +90,7 @@ class OutputContractTests(unittest.TestCase):
                     "status": "available",
                     "source_type": "official_registry_bulk",
                     "source_class": "official_registry_bulk",
-                    "source_url": "https://registry.example/123456789",
+                    "source_url": "https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv",
                     "retrieved_at": "2026-10-16T09:00:00Z",
                     "content_sha256": "a" * 64,
                     "value": {
@@ -103,7 +103,7 @@ class OutputContractTests(unittest.TestCase):
                     "status": "available",
                     "source_type": "official_annual_accounts",
                     "source_class": "official_annual_accounts",
-                    "source_url": "https://accounts.example/123456789",
+                    "source_url": "https://data.brreg.no/regnskapsregisteret/regnskap/123456789",
                     "retrieved_at": "2026-10-16T09:01:00Z",
                     "content_sha256": "b" * 64,
                     "value": {
@@ -123,7 +123,9 @@ class OutputContractTests(unittest.TestCase):
                     "value": {
                         "final_url": "https://example.no/",
                         "identity_assessment": {
-                            "publishable": True
+                            "status": "exact",
+                            "publishable": True,
+                            "method": "deterministic_name_org_evidence_v4",
                         },
                         "title": "Example Company",
                         "description": "Company website",
@@ -260,7 +262,7 @@ class OutputContractTests(unittest.TestCase):
                     "status": "available",
                     "source_type": "official_registry_bulk",
                     "source_class": "official_registry_bulk",
-                    "source_url": "https://registry.example/123456789",
+                    "source_url": "https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv",
                     "retrieved_at": "2026-10-16T09:00:00Z",
                     "content_sha256": "a" * 64,
                     "value": {
@@ -286,6 +288,85 @@ class OutputContractTests(unittest.TestCase):
 
         self.assertTrue(result["passed"], result)
 
+    def _provenance_envelope(self, *, financial_period="2025"):
+        profile = {
+            "organisation_number": "123456789",
+            "name": "Example Company AS",
+            "evidence": {
+                "registry": {
+                    "field": "registry",
+                    "status": "available",
+                    "source_type": "official_registry_bulk",
+                    "source_class": "official_registry_bulk",
+                    "source_url": "https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv",
+                    "retrieved_at": "2026-10-16T09:00:00Z",
+                    "content_sha256": "a" * 64,
+                    "source_row_key": "123456789",
+                    "value": {"organisation_number": "123456789", "name": "Example Company AS"},
+                },
+                "financials": {
+                    "field": "financials",
+                    "status": "available",
+                    "source_type": "official_annual_accounts",
+                    "source_class": "official_annual_accounts",
+                    "source_url": "https://data.brreg.no/regnskapsregisteret/regnskap/123456789",
+                    "retrieved_at": "2026-10-16T09:01:00Z",
+                    "content_sha256": "b" * 64,
+                    "value": {"records": [{"period": financial_period, "revenue": 0}]},
+                },
+            },
+        }
+        return contract_envelope(
+            profile,
+            run_id="provenance-test",
+            modules=["registry", "financials"],
+            started_at="2026-10-16T09:00:00Z",
+            completed_at="2026-10-16T09:02:00Z",
+        )
+
+    def test_available_claims_require_source_identity_rights_hash_and_period(self):
+        envelope = self._provenance_envelope()
+        valid = validate_contract_envelopes([envelope], expected_count=1)
+        self.assertTrue(valid["passed"], valid)
+
+        mutations = (
+            ("source_url", "not-a-url"),
+            ("retrieved_at", "yesterday"),
+            ("content_sha256", None),
+            ("organisation_number", "999999999"),
+            ("rights_status", "review_required"),
+        )
+        for key, value in mutations:
+            with self.subTest(key=key):
+                broken = self._provenance_envelope()
+                target = next(
+                    item for item in broken["evidence"]
+                    if item["source_class"] == "official_registry_bulk"
+                )
+                if key == "organisation_number":
+                    target["identity_proof"]["organisation_number"] = value
+                else:
+                    target[key] = value
+                result = validate_contract_envelopes([broken], expected_count=1)
+                self.assertFalse(result["passed"])
+                self.assertFalse(result["checks"]["available_claims_have_valid_provenance"])
+
+        missing_period = self._provenance_envelope(financial_period=None)
+        result = validate_contract_envelopes([missing_period], expected_count=1)
+        self.assertFalse(result["passed"])
+        self.assertFalse(result["checks"]["available_claims_have_valid_provenance"])
+
+    def test_official_source_class_cannot_use_an_unapproved_host(self):
+        envelope = self._provenance_envelope()
+        registry = next(
+            item for item in envelope["evidence"]
+            if item["source_class"] == "official_registry_bulk"
+        )
+        registry["source_url"] = "https://attacker.example/enhetsregisteret/api/enheter/lastned/csv"
+        result = validate_contract_envelopes([envelope], expected_count=1)
+        self.assertFalse(result["passed"])
+        self.assertFalse(result["checks"]["available_claims_have_valid_provenance"])
+
     def test_contract_validator_rejects_invalid_state_and_dangling_ref(self):
         profile = {
             "organisation_number": "123456789",
@@ -296,7 +377,7 @@ class OutputContractTests(unittest.TestCase):
                     "status": "available",
                     "source_type": "official_registry_bulk",
                     "source_class": "official_registry_bulk",
-                    "source_url": "https://registry.example/123456789",
+                    "source_url": "https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv",
                     "retrieved_at": "2026-10-16T09:00:00Z",
                     "content_sha256": "a" * 64,
                     "value": {
@@ -347,7 +428,7 @@ class OutputContractTests(unittest.TestCase):
                     "status": "available",
                     "source_type": "official_registry_bulk",
                     "source_class": "official_registry_bulk",
-                    "source_url": "https://registry.example/123456789",
+                    "source_url": "https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv",
                     "retrieved_at": "2026-10-16T09:00:00Z",
                     "content_sha256": "a" * 64,
                     "value": {
@@ -436,7 +517,7 @@ class OutputContractTests(unittest.TestCase):
             ]
 
             row = {
-                "organisasjonsnummer": "123456789",
+                "organisasjonsnummer": "923609016",
                 "navn": "Synthetic Example AS",
                 "organisasjonsform.kode": "AS",
                 "antallAnsatte": "3",
@@ -466,7 +547,7 @@ class OutputContractTests(unittest.TestCase):
 
             organisations_path.write_text(
                 json.dumps({
-                    "organisation_number": "123456789"
+                    "organisation_number": "923609016"
                 }) + "\n",
                 encoding="utf-8",
             )
@@ -513,7 +594,7 @@ class OutputContractTests(unittest.TestCase):
             self.assertEqual(len(output_rows), 1)
             self.assertEqual(
                 output_rows[0]["organisation_number"],
-                "123456789",
+                "923609016",
             )
 
             financial_claims = [

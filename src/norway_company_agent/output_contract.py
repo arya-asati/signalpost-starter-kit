@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import re
+from datetime import datetime
 from typing import Any, Iterable
+from urllib.parse import parse_qs, unquote, urlsplit
 
 
 AVAILABILITY_STATES = {
@@ -21,6 +25,7 @@ STATUS_MAP = {
     "blocked": "blocked",
     "source_error": "failed",
     "not_fetched": "failed",
+    "budget_exhausted": "failed",
 }
 
 FREE_MODULES = {
@@ -49,6 +54,244 @@ INTERNAL_VALUE_KEYS = {
     "requested_url",
     "registered_domain",
 }
+
+SOURCE_RIGHTS_STATUS = {
+    "official_registry_bulk": "open_data_nlod_2_0",
+    "official_registry_live": "open_data_nlod_2_0",
+    "official_annual_accounts": "open_data_nlod_2_0",
+    "official_annual_account_copies": "open_data_nlod_2_0",
+    "official_roles": "open_data_nlod_2_0",
+    "official_group_structure": "open_data_nlod_2_0",
+    "official_subunits": "open_data_nlod_2_0",
+    "registry_linked_company_website": "company_owned_factual_use",
+    "local_ruleset_interpretation": "local_ruleset_derivative",
+    "agent_execution": "not_applicable",
+}
+
+
+def _valid_source_url(value: Any) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        parsed = urlsplit(value.strip())
+        port = parsed.port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme in {"http", "https"}
+        and bool(parsed.hostname)
+        and parsed.username is None
+        and parsed.password is None
+        and (
+            port is None
+            or port == (443 if parsed.scheme == "https" else 80)
+        )
+    )
+
+
+def _timestamp_is_valid(value: Any) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None and parsed.utcoffset() is not None
+
+
+def _org_number_in_url(url: str, organisation_number: str) -> bool:
+    try:
+        parsed = urlsplit(url)
+        path_parts = [unquote(part) for part in parsed.path.split("/") if part]
+        query_values = [
+            item
+            for values in parse_qs(parsed.query, keep_blank_values=True).values()
+            for item in values
+        ]
+    except ValueError:
+        return False
+    return organisation_number in path_parts or organisation_number in query_values
+
+
+def _identity_proof(
+    organisation_number: str,
+    module: str,
+    record: dict[str, Any],
+    profile: dict[str, Any],
+) -> dict[str, Any] | None:
+    source_class = record.get("source_class") or record.get("source_type")
+    source_url = str(record.get("source_url") or "")
+    value = record.get("value") or {}
+
+    row_key = record.get("source_row_key")
+    if row_key not in (None, "", organisation_number):
+        return None
+
+    if source_class in SOURCE_RIGHTS_STATUS and source_class.startswith("official_"):
+        try:
+            parsed = urlsplit(source_url)
+            host = (parsed.hostname or "").casefold()
+            path = unquote(parsed.path)
+            query = parse_qs(parsed.query, keep_blank_values=True)
+        except ValueError:
+            return None
+        if host != "data.brreg.no":
+            return None
+        exact_row = row_key == organisation_number
+        exact_value = (
+            isinstance(value, dict)
+            and str(value.get("organisation_number") or "") == organisation_number
+        )
+        expected_paths = {
+            "official_registry_bulk": "/enhetsregisteret/api/enheter/lastned/csv",
+            "official_registry_live": f"/enhetsregisteret/api/enheter/{organisation_number}",
+            "official_annual_accounts": f"/regnskapsregisteret/regnskap/{organisation_number}",
+            "official_annual_account_copies": f"/regnskapsregisteret/regnskap/aarsregnskap/kopi/{organisation_number}/aar",
+            "official_roles": f"/enhetsregisteret/api/enheter/{organisation_number}/roller",
+            "official_group_structure": f"/enhetsregisteret/api/konsernstruktur/{organisation_number}",
+            "official_subunits": "/enhetsregisteret/api/underenheter",
+        }
+        exact_endpoint = path == expected_paths.get(source_class)
+        if source_class == "official_subunits":
+            exact_endpoint = (
+                exact_endpoint
+                and query.get("overordnetEnhet") == [organisation_number]
+            )
+        elif source_class == "official_registry_bulk":
+            exact_endpoint = exact_endpoint and bool(exact_row or exact_value)
+
+        if exact_endpoint:
+            return {
+                "method": (
+                    "exact_registry_row_key"
+                    if exact_row
+                    else "exact_source_entity_number"
+                    if exact_value
+                    else "exact_official_endpoint_organisation_number"
+                ),
+                "organisation_number": organisation_number,
+                "verified": True,
+            }
+        return None
+
+    if source_class == "local_ruleset_interpretation":
+        registry = (profile.get("evidence") or {}).get("registry") or {}
+        if (
+            row_key == organisation_number
+            and record.get("ruleset_sha256")
+            and registry.get("source_row_key") == organisation_number
+            and registry.get("content_sha256") == record.get("content_sha256")
+        ):
+            return {
+                "method": "exact_registry_row_and_local_ruleset",
+                "organisation_number": organisation_number,
+                "verified": True,
+            }
+        return None
+
+    if record.get("source_row_key") == organisation_number:
+        return {
+            "method": "exact_registry_row_key",
+            "organisation_number": organisation_number,
+            "verified": True,
+        }
+
+    if isinstance(value, dict) and str(value.get("organisation_number") or "") == organisation_number:
+        return {
+            "method": "exact_source_entity_number",
+            "organisation_number": organisation_number,
+            "verified": True,
+        }
+
+    if source_class == "registry_linked_company_website":
+        assessment = value.get("identity_assessment") or {}
+        if (
+            assessment.get("status") == "exact"
+            and assessment.get("publishable") is True
+            and assessment.get("method") == "deterministic_name_org_evidence_v4"
+        ):
+            return {
+                "method": assessment["method"],
+                "organisation_number": organisation_number,
+                "verified": True,
+            }
+        return None
+
+    return None
+
+
+def _identity_proof_is_valid(item: dict[str, Any], organisation_number: str) -> bool:
+    proof = item.get("identity_proof") or {}
+    if (
+        proof.get("verified") is not True
+        or proof.get("organisation_number") != organisation_number
+        or item.get("organisation_number") != organisation_number
+    ):
+        return False
+
+    source_class = item.get("source_class")
+    source_url = str(item.get("source_url") or "")
+    method = proof.get("method")
+    if source_class in SOURCE_RIGHTS_STATUS and source_class.startswith("official_"):
+        try:
+            parsed = urlsplit(source_url)
+            host = (parsed.hostname or "").casefold()
+            path = unquote(parsed.path)
+            query = parse_qs(parsed.query, keep_blank_values=True)
+        except ValueError:
+            return False
+        expected_paths = {
+            "official_registry_bulk": "/enhetsregisteret/api/enheter/lastned/csv",
+            "official_registry_live": f"/enhetsregisteret/api/enheter/{organisation_number}",
+            "official_annual_accounts": f"/regnskapsregisteret/regnskap/{organisation_number}",
+            "official_annual_account_copies": f"/regnskapsregisteret/regnskap/aarsregnskap/kopi/{organisation_number}/aar",
+            "official_roles": f"/enhetsregisteret/api/enheter/{organisation_number}/roller",
+            "official_group_structure": f"/enhetsregisteret/api/konsernstruktur/{organisation_number}",
+            "official_subunits": "/enhetsregisteret/api/underenheter",
+        }
+        if host != "data.brreg.no" or path != expected_paths.get(source_class):
+            return False
+        if source_class == "official_registry_bulk":
+            return (
+                item.get("source_row_key") == organisation_number
+                or method == "exact_source_entity_number"
+            )
+        if source_class == "official_subunits":
+            return query.get("overordnetEnhet") == [organisation_number]
+        return method in {
+            "exact_source_entity_number",
+            "exact_official_endpoint_organisation_number",
+        }
+
+    if source_class == "local_ruleset_interpretation":
+        return (
+            item.get("source_row_key") == organisation_number
+            and bool(item.get("ruleset_sha256"))
+            and method == "exact_registry_row_and_local_ruleset"
+        )
+
+    if source_class == "registry_linked_company_website":
+        return (
+            item.get("identity_assessment_status") == "exact"
+            and item.get("identity_assessment_method") == "deterministic_name_org_evidence_v4"
+            and method == "deterministic_name_org_evidence_v4"
+        )
+
+    return False
+
+
+def _reporting_periods(module: str, record: dict[str, Any]) -> list[Any]:
+    if module != "financials":
+        return []
+    value = record.get("value") or {}
+    rows = value.get("records") if isinstance(value, dict) else None
+    if not isinstance(rows, list):
+        return []
+    periods = []
+    for row in rows:
+        if isinstance(row, dict) and row.get("period") not in (None, "", {}, []):
+            periods.append(row["period"])
+    return periods
 
 
 def availability_from_evidence(
@@ -101,15 +344,34 @@ def _evidence_item(
     evidence_id: str,
     record: dict[str, Any],
     module: str,
+    organisation_number: str,
+    profile: dict[str, Any],
+    *,
+    temporal_status: str = "current",
 ) -> dict[str, Any]:
+    source_class = (
+        record.get("source_class")
+        or record.get("source_type")
+        or "unknown"
+    )
     item: dict[str, Any] = {
         "id": evidence_id,
-        "source_class": (
-            record.get("source_class")
-            or record.get("source_type")
-            or "unknown"
+        "source_class": source_class,
+        "status": record.get("status"),
+        "organisation_number": organisation_number,
+        "identity_proof": _identity_proof(
+            organisation_number,
+            module,
+            record,
+            profile,
         ),
+        "rights_status": record.get("rights_status") or SOURCE_RIGHTS_STATUS.get(source_class),
+        "temporal_status": temporal_status,
     }
+    if source_class == "registry_linked_company_website":
+        assessment = (record.get("value") or {}).get("identity_assessment") or {}
+        item["identity_assessment_status"] = assessment.get("status")
+        item["identity_assessment_method"] = assessment.get("method")
 
     for key in (
         "source_url",
@@ -122,10 +384,16 @@ def _evidence_item(
         "effective_at",
         "claim_span",
         "note",
+        "reference_url",
+        "ruleset_sha256",
     ):
         value = record.get(key)
         if value is not None and value != "":
             item[key] = value
+
+    reporting_periods = _reporting_periods(module, record)
+    if reporting_periods:
+        item["reporting_periods"] = reporting_periods
 
     return item
 
@@ -217,6 +485,7 @@ def _confidence_for_claim(
         "official_group_structure": 0.90,
         "official_subunits": 0.90,
         "registry_linked_company_website": 0.80,
+        "independently_verified_company_website": 0.80,
         "local_ruleset_interpretation": 0.75,
         # Support older evidence records during migration.
         "official_rule_interpretation": 0.75,
@@ -300,7 +569,11 @@ def _claims_for_record(
 
         # Do not publish website facts as verified until identity has passed
         # the existing exact-company identity gate.
-        if assessment.get("publishable") is not True:
+        if (
+            assessment.get("status") != "exact"
+            or assessment.get("publishable") is not True
+            or assessment.get("method") != "deterministic_name_org_evidence_v4"
+        ):
             availability = (
                 "ambiguous" if website_url else "not_available"
             )
@@ -457,7 +730,13 @@ def contract_envelope(
 
             if evidence_id not in seen_evidence_ids:
                 evidence_items.append(
-                    _evidence_item(evidence_id, record, module)
+                    _evidence_item(
+                        evidence_id,
+                        record,
+                        module,
+                        organisation_number,
+                        profile,
+                    )
                 )
                 seen_evidence_ids.add(evidence_id)
 
@@ -489,7 +768,13 @@ def contract_envelope(
 
         if evidence_id not in seen_evidence_ids:
             evidence_items.append(
-                _evidence_item(evidence_id, record, module)
+                _evidence_item(
+                    evidence_id,
+                    record,
+                    module,
+                    organisation_number,
+                    profile,
+                )
             )
             seen_evidence_ids.add(evidence_id)
 
@@ -503,7 +788,11 @@ def contract_envelope(
             )
         )
 
-        if record.get("status") in {"source_error", "not_fetched"}:
+        if record.get("status") in {
+            "source_error",
+            "not_fetched",
+            "budget_exhausted",
+        }:
             errors.append(
                 {
                     "field": module,
@@ -528,18 +817,77 @@ def contract_envelope(
         if profile.get(key) is not None:
             legal_identity[key] = profile[key]
 
+    historical_items = []
+    historical_ids: set[str] = set()
+    for historical in profile.get("historical_evidence") or []:
+        if not isinstance(historical, dict):
+            continue
+        module = str(historical.get("module") or "unknown")
+        record = historical.get("record")
+        if not isinstance(record, dict):
+            continue
+        stable = json.dumps(
+            {
+                "organisation_number": organisation_number,
+                "module": module,
+                "record": record,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        history_id = "hist-" + hashlib.sha256(stable.encode("utf-8")).hexdigest()[:20]
+        if history_id in historical_ids:
+            continue
+        historical_ids.add(history_id)
+        item = _evidence_item(
+            history_id,
+            record,
+            module,
+            organisation_number,
+            profile,
+            temporal_status="historical",
+        )
+        item["module"] = module
+        item["record"] = record
+        historical_items.append(item)
+
     source_snapshots = []
     seen_snapshots = set()
 
     for item in evidence_items:
         snapshot = {
             key: item[key]
-            for key in ("source_url", "retrieved_at", "content_sha256")
+            for key in (
+                "source_url",
+                "retrieved_at",
+                "content_sha256",
+                "organisation_number",
+                "temporal_status",
+            )
             if item.get(key)
         }
 
         snapshot_key = tuple(snapshot.items())
 
+        if snapshot and snapshot_key not in seen_snapshots:
+            source_snapshots.append(snapshot)
+            seen_snapshots.add(snapshot_key)
+
+    for item in historical_items:
+        snapshot = {
+            key: item[key]
+            for key in (
+                "source_url",
+                "retrieved_at",
+                "content_sha256",
+                "organisation_number",
+                "temporal_status",
+            )
+            if item.get(key)
+        }
+        snapshot_key = tuple(snapshot.items())
         if snapshot and snapshot_key not in seen_snapshots:
             source_snapshots.append(snapshot)
             seen_snapshots.add(snapshot_key)
@@ -560,6 +908,12 @@ def contract_envelope(
             )
 
     refresh_checked = bool(profile.get("refresh_checked"))
+    refresh_metadata = profile.get("refresh_metadata") or {
+        "status": "checked" if refresh_checked else "not_checked",
+        "previous_snapshot_available": bool(
+            profile.get("previous_snapshot_available", False)
+        ),
+    }
 
     return {
         "organisation_number": organisation_number,
@@ -572,13 +926,9 @@ def contract_envelope(
         },
         "claims": claims,
         "evidence": evidence_items,
+        "historical_evidence": historical_items,
         "source_snapshots": source_snapshots,
-        "refresh_metadata": {
-            "status": "checked" if refresh_checked else "not_checked",
-            "previous_snapshot_available": bool(
-                profile.get("previous_snapshot_available", False)
-            ),
-        },
+        "refresh_metadata": refresh_metadata,
         "changes": profile.get("changes") or [],
         "errors": errors + list(profile.get("errors") or []),
         "operations": {
@@ -604,6 +954,9 @@ def validate_contract_envelopes(
     dangling_evidence_refs = []
     missing_sections = []
     identity_errors = []
+    provenance_errors = []
+    historical_reference_errors = []
+    refresh_errors = []
 
     required_sections = {
         "organisation_number",
@@ -611,6 +964,7 @@ def validate_contract_envelopes(
         "run",
         "claims",
         "evidence",
+        "historical_evidence",
         "source_snapshots",
         "refresh_metadata",
         "changes",
@@ -643,12 +997,61 @@ def validate_contract_envelopes(
                 }
             )
 
+        refresh_metadata = envelope.get("refresh_metadata") or {}
+        refresh_status = refresh_metadata.get("status")
+        if refresh_status not in {"not_checked", "initialized", "checked"}:
+            refresh_errors.append({
+                "index": envelope_index,
+                "organisation_number": org,
+                "reason": "unknown refresh status",
+            })
+        elif refresh_status == "checked":
+            if (
+                refresh_metadata.get("previous_snapshot_available") is not True
+                or not re.fullmatch(
+                    r"[0-9a-fA-F]{64}",
+                    str(refresh_metadata.get("previous_snapshot_sha256") or ""),
+                )
+                or not re.fullmatch(
+                    r"[0-9a-fA-F]{64}",
+                    str(refresh_metadata.get("current_snapshot_sha256") or ""),
+                )
+                or not isinstance(refresh_metadata.get("idempotent"), bool)
+            ):
+                refresh_errors.append({
+                    "index": envelope_index,
+                    "organisation_number": org,
+                    "reason": "checked refresh metadata is incomplete",
+                })
+        elif refresh_status == "initialized" and refresh_metadata.get("previous_snapshot_available") is not False:
+            refresh_errors.append({
+                "index": envelope_index,
+                "organisation_number": org,
+                "reason": "initial refresh cannot claim a previous snapshot",
+            })
+
         evidence_rows = envelope.get("evidence") or []
-        evidence_ids = {
-            item.get("id")
+        evidence_by_id = {
+            item.get("id"): item
             for item in evidence_rows
             if item.get("id")
         }
+        evidence_ids = set(evidence_by_id)
+        historical_rows = envelope.get("historical_evidence") or []
+        historical_ids = set()
+        for historical in historical_rows:
+            history_id = historical.get("id")
+            if history_id:
+                historical_ids.add(history_id)
+            if (
+                historical.get("temporal_status") != "historical"
+                or historical.get("organisation_number") != org
+                or historical.get("record") is None
+            ):
+                provenance_errors.append({
+                    "organisation_number": org,
+                    "reason": "historical evidence is missing its explicit historical identity",
+                })
 
         claims = envelope.get("claims") or []
 
@@ -678,6 +1081,14 @@ def validate_contract_envelopes(
 
             for evidence_id in refs:
                 if evidence_id not in evidence_ids:
+                    if evidence_id in historical_ids:
+                        historical_reference_errors.append({
+                            "organisation_number": org,
+                            "claim_index": claim_index,
+                            "evidence_id": evidence_id,
+                            "reason": "historical evidence cannot support a current claim",
+                        })
+                        continue
                     dangling_evidence_refs.append(
                         {
                             "organisation_number": org,
@@ -686,6 +1097,57 @@ def validate_contract_envelopes(
                             "reason": "evidence reference not found",
                         }
                     )
+                    continue
+
+                if state == "available":
+                    item = evidence_by_id[evidence_id]
+                    source_class = item.get("source_class")
+                    expected_rights = SOURCE_RIGHTS_STATUS.get(source_class)
+                    if not _valid_source_url(item.get("source_url")):
+                        provenance_errors.append({
+                            "organisation_number": org,
+                            "claim_index": claim_index,
+                            "evidence_id": evidence_id,
+                            "reason": "available claim source URL is missing or invalid",
+                        })
+                    if not _timestamp_is_valid(item.get("retrieved_at")):
+                        provenance_errors.append({
+                            "organisation_number": org,
+                            "claim_index": claim_index,
+                            "evidence_id": evidence_id,
+                            "reason": "available claim retrieval timestamp is missing or invalid",
+                        })
+                    if not re.fullmatch(r"[0-9a-fA-F]{64}", str(item.get("content_sha256") or "")):
+                        provenance_errors.append({
+                            "organisation_number": org,
+                            "claim_index": claim_index,
+                            "evidence_id": evidence_id,
+                            "reason": "available claim content hash is missing or invalid",
+                        })
+                    if not _identity_proof_is_valid(item, org):
+                        provenance_errors.append({
+                            "organisation_number": org,
+                            "claim_index": claim_index,
+                            "evidence_id": evidence_id,
+                            "reason": "available claim lacks exact organisation identity proof",
+                        })
+                    if expected_rights is None or item.get("rights_status") != expected_rights:
+                        provenance_errors.append({
+                            "organisation_number": org,
+                            "claim_index": claim_index,
+                            "evidence_id": evidence_id,
+                            "reason": "available claim has an unknown or inconsistent source rights status",
+                        })
+                    if (
+                        str(claim.get("field") or "").startswith("financials.records[")
+                        and not item.get("reporting_periods")
+                    ):
+                        provenance_errors.append({
+                            "organisation_number": org,
+                            "claim_index": claim_index,
+                            "evidence_id": evidence_id,
+                            "reason": "financial claim is missing its reporting period",
+                        })
 
     checks = {
         "exact_expected_count": len(envelopes) == expected_count,
@@ -698,6 +1160,9 @@ def validate_contract_envelopes(
         "all_claim_evidence_references_resolve": (
             not dangling_evidence_refs
         ),
+        "available_claims_have_valid_provenance": not provenance_errors,
+        "historical_evidence_is_not_used_for_current_claims": not historical_reference_errors,
+        "refresh_metadata_is_valid": not refresh_errors,
     }
 
     return {
@@ -707,4 +1172,7 @@ def validate_contract_envelopes(
         "dangling_evidence_refs": dangling_evidence_refs,
         "missing_sections": missing_sections,
         "identity_errors": identity_errors,
+        "provenance_errors": provenance_errors,
+        "historical_reference_errors": historical_reference_errors,
+        "refresh_errors": refresh_errors,
     }
